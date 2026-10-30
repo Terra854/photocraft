@@ -1,7 +1,7 @@
 use super::filters::smart;
 use super::source::{
-    SourceImage, cache_get_counted, cache_get_without_preparation, cache_key, cache_put, decode_source_admitted_in, source_bytes, source_image,
-    source_image_in, source_surface, svg_source_image, vector_scale,
+    SourceImage, cache_get_counted, cache_get_without_preparation, cache_key, cache_put, decode_source_admitted_in, flattened_source, source_bytes,
+    source_image, source_image_in, source_surface_from_buffer, svg_source_image, vector_scale,
 };
 use super::{
     Affine, Arc, BlendMode, Document, EngineError, Homography, JobCtx, Layer, LayerContent, LayerId, PixelFormat, Rect, Result, SmartFilter, SmartObject,
@@ -226,9 +226,7 @@ fn stack_image_in(file_name: &str, bytes: &[u8], fmt: PixelFormat, mode: photocr
 pub(crate) fn prepared_source_image(doc: &Document, fmt: PixelFormat, mode: Option<photocraft_doc::StackMode>, ctx: &JobCtx) -> Result<SourceImage> {
     ctx.check()?;
     let Some(mode) = mode else {
-        let buf = photocraft_compose::flatten(doc);
-        ctx.check()?;
-        let image = SourceImage { surface: Arc::new(source_surface(doc, &buf, fmt)?), bounds: doc.bounds() };
+        let image = SourceImage { surface: Arc::new(flattened_source(doc, fmt)?), bounds: doc.bounds() };
         ctx.check()?;
         return Ok(image);
     };
@@ -266,7 +264,7 @@ pub(crate) fn prepared_source_image(doc: &Document, fmt: PixelFormat, mode: Opti
     };
     let buf = photocraft_compose::Buffer { rect: bounds, px: photocraft_algo::stack::combine(&frames, stat) };
     ctx.check()?;
-    let image = SourceImage { surface: Arc::new(source_surface(doc, &buf, fmt)?), bounds };
+    let image = SourceImage { surface: Arc::new(source_surface_from_buffer(doc, &buf, fmt)?), bounds };
     ctx.check()?;
     Ok(image)
 }

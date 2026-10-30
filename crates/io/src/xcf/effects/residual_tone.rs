@@ -479,7 +479,7 @@ pub(super) fn pattern_result(
         || height == 0
         || width > photocraft_doc::pattern::MAX_EDGE
         || height > photocraft_doc::pattern::MAX_EDGE
-        || count > photocraft_doc::pattern::MAX_PAINT_PIXELS
+        || count > photocraft_doc::pattern::max_paint_pixels(SampleType::F32)
     {
         return Err("source pattern exceeds ordinary native pattern edge/paint limits".into());
     }
@@ -719,6 +719,23 @@ mod tests {
             remaining_metadata_bytes: crate::xcf::MAX_METADATA_BYTES,
             interrupt: photocraft_raster::Interrupt::NONE,
         }
+    }
+    #[test]
+    /// Enforce the native float-pattern working limit before sampling or allocating a generated pattern.
+    fn generated_pattern_respects_native_working_limit_before_sampling() {
+        let context = MappingContext { remaining_generation_bytes: usize::MAX, ..ctx() };
+        let Err(error) = pattern_result(
+            "Oversized native float pattern",
+            Size::new(8192, 4096),
+            (0., 0.),
+            0.,
+            &context,
+            |_, _| panic!("an unpaintable native pattern must not be sampled"),
+            "No native pattern should be produced",
+        ) else {
+            panic!("native float paint limit must be enforced");
+        };
+        assert!(error.message.contains("paint limits"), "{error:?}");
     }
     /// Construct a floating stored control for direct mapper tests without config-text parsing.
     fn arg(name: &'static str, value: f32) -> Argument<'static> {

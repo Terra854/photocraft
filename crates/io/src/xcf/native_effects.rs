@@ -350,9 +350,9 @@ pub(super) fn add_patterns(document: &mut Document, patterns: Vec<photocraft_doc
             || pattern.height == 0
             || pattern.width > photocraft_doc::pattern::MAX_EDGE
             || pattern.height > photocraft_doc::pattern::MAX_EDGE
-            || u64::from(pattern.width) * u64::from(pattern.height) > photocraft_doc::pattern::MAX_PAINT_PIXELS
+            || !pattern.is_paintable()
         {
-            return Err(invalid("native effect pattern dimensions exceed paint limits"));
+            return Err(invalid("native effect pattern dimensions or working set exceed native paint limits"));
         }
         if let Some(existing) = document.patterns.iter().find(|existing| existing.id == pattern.id) {
             if existing != &pattern {
@@ -1757,6 +1757,26 @@ mod tests {
     use photocraft_color::{Color, SampleType};
     use photocraft_doc::effects::{Effect, FxCommon};
     use serde_json::json;
+
+    #[test]
+    /// Refuse a sparse float pattern whose declared working set cannot paint, before retaining it or charging the allowance.
+    fn native_pattern_admission_respects_depth_working_limit_before_retention() {
+        let pattern = photocraft_doc::Pattern {
+            id: "over-native-working-limit".into(),
+            name: "Sparse float pattern".into(),
+            width: 8192,
+            height: 4096,
+            surface: Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::F32, true)),
+        };
+        assert!(pattern.pixel_count() <= photocraft_doc::pattern::MAX_PAINT_PIXELS);
+        assert!(!pattern.is_paintable());
+        let mut doc = document();
+        let mut budget = 1024;
+        let error = add_patterns(&mut doc, vec![pattern], &mut budget, &Interrupt::NONE).unwrap_err();
+        assert!(error.to_string().contains("working set"));
+        assert!(doc.patterns.is_empty());
+        assert_eq!(budget, 1024);
+    }
 
     /// Builds the small native document fixture used to inspect embedded content and resource behavior.
     fn document() -> Document {

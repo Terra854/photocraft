@@ -296,6 +296,15 @@ pub struct Session {
     /// Decoded imports awaiting confirmation, including the request-time color policy.
     held_opens: Vec<(u64, HeldImportedDocument)>,
     next_held_open: u64,
+    /// The document before the latest [`Session::edit`] of the running command, which
+    /// [`Session::hint_damage`] checks a hint against. Set by `edit`, taken by `hint_damage`,
+    /// dropped when the command ends. Debug and test builds only.
+    #[cfg(any(test, debug_assertions))]
+    hint_before: Option<Arc<Document>>,
+    /// Damage hints that missed a tile their edit changed ([`Session::hint_damage`]): each one a
+    /// command reporting too narrow a redraw area (#4053). Counted in debug and test builds only;
+    /// tests read it.
+    pub damage_misses: usize,
 }
 
 #[cfg(test)]
@@ -307,3 +316,5 @@ mod tests;
 
 #[cfg(test)]
 mod fx_mode_tests;
+
+pub mod command_hints;

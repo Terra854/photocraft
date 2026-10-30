@@ -92,6 +92,7 @@ const SAVE_FILTERS: &[(&str, &[&str])] = &[
     ("OpenRaster", &["ora"]),
     ("PNG", &["png"]),
     ("JPEG", &["jpg", "jpeg"]),
+    ("JPEG XL", &["jxl"]),
     ("WebP", &["webp"]),
     ("TIFF", &["tif", "tiff"]),
     ("Targa", &["tga"]),
@@ -634,12 +635,6 @@ fn shell_word(s: &str) -> String {
     if s.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-+:,@".contains(&b)) { s.to_string() } else { format!("'{}'", s.replace('\'', r"'\''")) }
 }
 
-/// The release-check transport, or `None` inside Flatpak: the sandbox has no network (see the
-/// manifest's finish-args) and `flatpak update` owns updates there.
-fn update_transport(flatpak_id: Option<&std::ffi::OsStr>) -> Option<photocraft_engine::updates_cmds::CheckFn> {
-    flatpak_id.is_none().then(crate::updates::service)
-}
-
 /// Assemble desktop platform services, including alias-aware source checks and capability-scoped automation I/O when a
 /// workspace is supplied.
 pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) -> Services {
@@ -709,7 +704,7 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         inbox: None,
         open_url: Some(Box::new(|url: &str| open::that(url).map_err(|e| e.to_string()))),
         beep: Some(platform_beep),
-        check_updates: update_transport(std::env::var_os("FLATPAK_ID").as_deref()),
+        check_updates: Some(crate::updates::service()),
         clipboard_set_image: Some({
             let clip = clip.clone();
             guarded_clipboard_set(move |w: u32, h: u32, px: &[u8]| {

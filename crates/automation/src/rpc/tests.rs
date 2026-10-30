@@ -268,7 +268,8 @@ fn doc_save_rejects_a_bad_quality_instead_of_ignoring_or_clamping_it() {
     }
     h.handle("doc.save", json!({"path": path.to_string_lossy(), "quality": 85})).unwrap();
     let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(bytes.get(12..16), Some(&b"VP8 "[..]), "a WebP saved with a quality is lossy");
+    // The lossy chunk; an extended WebP (one carrying a colour profile) puts `VP8X` first.
+    assert!(bytes.windows(4).any(|c| c == b"VP8 ") && !bytes.windows(4).any(|c| c == b"VP8L"), "a WebP saved with a quality is lossy");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -817,6 +818,23 @@ fn methods_lists_the_job_methods_and_every_listed_name_is_served() {
     assert!(h.handle("jobs.nope", Value::Null).unwrap_err().to_string().contains("unknown method"));
 }
 
+/// #3674: a guessed name gets a pointer to the right one, in both directions.
+#[test]
+fn unknown_names_suggest_the_right_method_or_command() {
+    let mut h = Headless::new();
+    let err = |h: &mut Headless, m: &str, p: Value| h.handle(m, p).unwrap_err().to_string();
+    let e = err(&mut h, "engine.execute", json!({"command": "engine.commands"}));
+    assert!(e.contains("did you mean `command.list`") && e.contains("protocol method"), "{e}");
+    let e = err(&mut h, "engine.execute", json!({"command": "doc.inspect"}));
+    assert!(e.contains("`doc.inspect` is a protocol method"), "{e}");
+    let e = err(&mut h, "engine.execute", json!({"command": "edit.undoo"}));
+    assert!(e.contains("did you mean `edit.undo`"), "{e}");
+    let e = err(&mut h, "doc.inspct", Value::Null);
+    assert!(e.contains("did you mean `doc.inspect`") && e.contains("(try `methods`)"), "{e}");
+    let e = err(&mut h, "edit.undo", Value::Null);
+    assert!(e.contains("engine.execute {\"command\": \"edit.undo\"}"), "{e}");
+}
+
 #[test]
 fn batch_response_budget_stops_later_steps_even_when_stop_on_error_is_false() {
     let mut h = Headless::new();
@@ -928,10 +946,13 @@ fn tcp_connections_must_authenticate_before_the_deadline_whatever_they_send() {
     line.clear();
     reader.read_line(&mut line).unwrap();
     assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["id"], "a");
+    // Keep both client handles alive until the server observes FIN. Closing a duplicated
+    // socket first can turn this graceful-EOF assertion into a Windows connection reset.
+    s.shutdown(std::net::Shutdown::Write).unwrap();
+    let results = server.join().unwrap();
     drop(reader);
     drop(s);
 
-    let results = server.join().unwrap();
     let (slow_result, slow_time) = &results[0];
     assert!(matches!(slow_result, Err(std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)), "{slow_result:?}");
     assert!(*slow_time < Duration::from_secs(3), "the trickle did not extend the deadline: {slow_time:?}");
