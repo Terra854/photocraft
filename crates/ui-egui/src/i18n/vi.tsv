@@ -3794,17 +3794,8 @@ curves	Smooth	Làm mượt
 	Kept {name}: written by another application	Đã giữ {name}: do ứng dụng khác ghi
 	Shadow Tint	Sắc độ bóng tối
 	Check for Updates…	Kiểm tra bản cập nhật…
-	PhotoCraft Updates	Bản cập nhật PhotoCraft
-	Checking for updates…	Đang kiểm tra bản cập nhật…
 	Open the release page to choose an installer for your system.	Mở trang phát hành để chọn bộ cài đặt cho hệ thống của bạn.
-	Open Download Page	Mở trang tải xuống
-	PhotoCraft is up to date.	PhotoCraft đã được cập nhật.
-	Could not check for updates.	Không thể kiểm tra bản cập nhật.
-	Updates have not been checked yet.	Chưa kiểm tra bản cập nhật.
-	Check Again	Kiểm tra lại
 	Automatically Check for Updates	Tự động kiểm tra bản cập nhật
-	Installed version: {version}	Phiên bản đã cài: {version}
-	PhotoCraft {version} is available.	PhotoCraft {version} đã có sẵn.
 	Paints from the History panel's source state	Vẽ từ trạng thái nguồn của bảng Lịch sử
 	Sets the source for the history brush	Đặt nguồn cho cọ lịch sử
 	Highlight Mode	Chế độ vùng sáng
@@ -4010,8 +4001,9 @@ curves	Smooth	Làm mượt
 	Select and Mask was closed: its document is no longer the active one	Đã đóng Chọn và Mặt nạ: tài liệu của nó không còn là tài liệu đang hoạt động
 	Select and Mask was closed: another layer was selected	Đã đóng Chọn và Mặt nạ: một lớp khác đã được chọn
 	Select Layer Under Cursor	Chọn lớp dưới con trỏ
+	Edit Brush…	Chỉnh sửa cọ…
 
-# Native XCF import and filter labels
+# Native XCF import report
 	Import Conversion Report	Báo cáo chuyển đổi khi nhập
 	Import-time outcomes. Editing uses native PhotoCraft rules.	Kết quả tại thời điểm nhập. Việc chỉnh sửa dùng các quy tắc gốc của PhotoCraft.
 	A newer report format is retained. Its details cannot be displayed.	Một báo cáo ở định dạng mới hơn được giữ lại. Không thể hiển thị chi tiết của báo cáo đó.
