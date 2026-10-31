@@ -503,8 +503,8 @@ fn warm_smart_free_sources_reuse_pixels_without_reentering_the_decoder() {
 }
 
 #[test]
-/// A warm Smart-bearing source still enters preparation, and its decode counter advances on actual revalidation.
-fn warm_smart_source_revalidates_before_cache_reuse_and_counts_decodes() {
+/// A warm Smart-bearing source rechecks its recorded authority without entering the decoder again.
+fn warm_smart_source_rechecks_authority_without_redecoding() {
     let mut layer = smart(source(Color::rgb(0.37, 0.19, 0.61)));
     let LayerContent::Smart(object) = &mut layer.content else { panic!("native Smart") };
     object.smart_filters.push(SmartFilter {
@@ -519,12 +519,12 @@ fn warm_smart_source_revalidates_before_cache_reuse_and_counts_decodes() {
     smart_cmds::source_image("action.pcraft", &bytes, doc.pixel_format()).unwrap();
     assert_eq!(smart_cmds::source_decode_count(&bytes, doc.pixel_format()), 1);
     smart_cmds::source_image("action.pcraft", &bytes, doc.pixel_format()).unwrap();
-    assert_eq!(smart_cmds::source_decode_count(&bytes, doc.pixel_format()), 2);
+    assert_eq!(smart_cmds::source_decode_count(&bytes, doc.pixel_format()), 1);
     crate::allocation::fail_next_for_test();
-    let refused = smart_cmds::source_image("action.pcraft", &bytes, doc.pixel_format());
+    let reused = smart_cmds::source_image("action.pcraft", &bytes, doc.pixel_format());
     let reset = crate::allocation::checkpoint("clear possible test failpoint");
-    assert!(refused.is_err(), "an action-bearing cache must not hide failed decoder admission");
-    assert!(reset.is_ok(), "the attempted decode must consume the armed failpoint");
+    assert!(reused.is_ok(), "a proved warm source reuses its authorized pixels");
+    assert!(reset.is_err(), "the warm hit must leave the decoder failpoint armed");
 }
 
 /// Keep one simple vector shape in the actual SVG renderer rather than supplying a native cached substitute.

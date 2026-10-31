@@ -1,6 +1,7 @@
 use super::rendering::prepared_source_image;
 use std::sync::PoisonError;
 
+use crate::jobs::render_proof::{self, Proof};
 use photocraft_geom::TILE_SIZE;
 
 use super::{
@@ -77,13 +78,13 @@ struct CacheEntry {
     key: CacheKey,
     image: SourceImage,
     decodes: u32,
-    reusable_without_preparation: bool,
+    authorization: Proof,
     /// The surface's real tile bytes, counted once when it is cached.
     bytes: usize,
 }
 
-/// Decoded source composites by content hash, most recent last. Sources proven free of Smart
-/// content reuse decoded pixels; other sources revalidate stored commands under the current authority.
+/// Decoded source composites by content hash, most recent last. A complete authorization proof
+/// rechecks stored commands under the current authority without decoding nested contents again.
 static SOURCE_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -105,17 +106,14 @@ pub(super) fn cache_key(bytes: &[u8], fmt: PixelFormat) -> CacheKey {
     (*blake3::hash(bytes).as_bytes(), fmt)
 }
 
-pub(super) fn cache_get(key: &CacheKey) -> Option<SourceImage> {
-    cache_get_counted(key, false)
-}
-
-pub(super) fn cache_put(key: CacheKey, image: SourceImage, reusable_without_preparation: bool, decoded: bool) {
-    cache_put_within(key, image, reusable_without_preparation, decoded, CACHE_BYTES);
+pub(super) fn cache_put(key: CacheKey, image: SourceImage, authorization: Option<Proof>, decoded: bool) {
+    cache_put_within(key, image, authorization, decoded, CACHE_BYTES);
 }
 
 /// Use upstream's actual tile-byte budget while retaining source admission and decode diagnostics.
-fn cache_put_within(key: CacheKey, image: SourceImage, reusable_without_preparation: bool, decoded: bool, limit: usize) {
-    let bytes = super::stack_cache::surface_bytes(&image.surface);
+fn cache_put_within(key: CacheKey, image: SourceImage, authorization: Option<Proof>, decoded: bool, limit: usize) {
+    let Some(authorization) = authorization else { return };
+    let Some(bytes) = super::stack_cache::surface_bytes(&image.surface).checked_add(authorization.bytes()) else { return };
     let mut c = cache();
     let decodes = match c.iter().position(|e| e.key == key) {
         Some(i) => c.remove(i).decodes.saturating_add(u32::from(decoded)),
@@ -124,7 +122,7 @@ fn cache_put_within(key: CacheKey, image: SourceImage, reusable_without_preparat
     if bytes > limit {
         return;
     }
-    c.push(CacheEntry { key, image, decodes, reusable_without_preparation, bytes });
+    c.push(CacheEntry { key, image, decodes, authorization, bytes });
     while c.len() > CACHE_ENTRIES || c.iter().map(|e| e.bytes).sum::<usize>() > limit {
         c.remove(0);
     }
@@ -137,7 +135,7 @@ pub fn source_decode_count(bytes: &[u8], fmt: PixelFormat) -> u32 {
     cache().iter().find(|e| e.key == key).map(|e| e.decodes).unwrap_or(0)
 }
 
-/// Bytes held by cached source composites.
+/// Bytes held by cached source composites and their retained authorization evidence.
 pub fn source_cache_bytes() -> usize {
     cache().iter().map(|e| e.bytes).sum()
 }
@@ -295,7 +293,7 @@ pub fn svg_source_image(bytes: &[u8], fmt: PixelFormat, scale: f64) -> Result<So
     }
     let buf = photocraft_io::svg::rasterize(bytes, scale as f32).map_err(|e| other(format!("can't render the SVG smart object: {e}")))?;
     let img = SourceImage { surface: Arc::new(buffer_to_surface(&buf, fmt)), bounds: buf.rect };
-    cache_put(key, img.clone(), true, true);
+    cache_put(key, img.clone(), Some(Proof::default()), true);
     Ok(img)
 }
 
@@ -310,18 +308,18 @@ pub(super) fn vector_scale(sm: &SmartObject) -> f64 {
     ((k * 16.0).ceil() / 16.0).clamp(1.0 / 16.0, 64.0)
 }
 
-/// The composited source image in `fmt`; raw Smart-free sources reuse caches and other sources recheck authority.
+/// The composited source image in `fmt`, rechecking stored-command authority before cache reuse.
 pub fn source_image(file_name: &str, bytes: &[u8], fmt: PixelFormat) -> Result<SourceImage> {
     source_image_in(file_name, bytes, fmt, &JobCtx::new())
 }
 
 /// Prepare one externally supplied source; nested contents share the preparer's ledger rather than re-entering here.
 pub(super) fn decode_source_in(file_name: &str, bytes: &[u8], ctx: &JobCtx) -> Result<Document> {
-    decode_source_admitted_in(file_name, bytes, ctx).map(|(document, _)| document)
+    decode_source_admitted_in(file_name, bytes, ctx)
 }
 
-/// Establish cache reuse eligibility from raw native structure before preparation can materialize stored actions.
-pub(super) fn decode_source_admitted_in(file_name: &str, bytes: &[u8], ctx: &JobCtx) -> Result<(Document, bool)> {
+/// Decode and prepare a cold source; an enclosing recording retains original auto-action authorization too.
+pub(super) fn decode_source_admitted_in(file_name: &str, bytes: &[u8], ctx: &JobCtx) -> Result<Document> {
     ctx.check()?;
     crate::allocation::checkpoint("importing document")?;
     let imported = ctx
@@ -333,12 +331,11 @@ pub(super) fn decode_source_admitted_in(file_name: &str, bytes: &[u8], ctx: &Job
         )));
     }
     let mut doc = imported.document;
-    let reusable = source_without_stored_commands(&doc, ctx)?;
     crate::import_prepare::prepare_imported_document(&mut doc, ctx)?;
-    Ok((doc, reusable))
+    Ok(doc)
 }
 
-/// A bounded iterative raw-layer walk proves cache reuse cannot bypass Smart source or filter replay.
+/// Only command-free raw conversion seeds may supply an empty proof; Smart-bearing seeds need preparation first.
 pub(super) fn source_without_stored_commands(doc: &Document, ctx: &JobCtx) -> Result<bool> {
     let mut groups = vec![doc.layers.iter()];
     while let Some(children) = groups.last_mut() {
@@ -360,22 +357,26 @@ pub(super) fn source_without_stored_commands(doc: &Document, ctx: &JobCtx) -> Re
     Ok(true)
 }
 
-/// Reuse only a raw-decoder proof, never an extension or a post-preparation document that hides pending actions.
-pub(super) fn cache_get_without_preparation(key: &CacheKey) -> Option<SourceImage> {
-    let mut cache = cache();
-    let index = cache.iter().position(|entry| entry.key == *key && entry.reusable_without_preparation)?;
-    let entry = cache.remove(index);
-    let image = entry.image.clone();
-    cache.push(entry);
-    Some(image)
+/// Never hold the cache mutex while calling a host's gate; it may inspect or purge the cache.
+pub(super) fn cache_get_authorized(key: &CacheKey, ctx: &JobCtx) -> Result<Option<SourceImage>> {
+    let cached = {
+        let mut cache = cache();
+        let Some(index) = cache.iter().position(|entry| entry.key == *key) else { return Ok(None) };
+        let entry = cache.remove(index);
+        let cached = (entry.image.clone(), entry.authorization.clone());
+        cache.push(entry);
+        cached
+    };
+    let (image, authorization) = cached;
+    authorization.authorize(ctx)?;
+    Ok(Some(image))
 }
 
-/// Count successful source redecodes even when the already composed image remains reusable.
-pub(super) fn cache_get_counted(key: &CacheKey, decoded: bool) -> Option<SourceImage> {
+/// Unconditional lookup for command-free SVG rasterizations and cache-accounting tests.
+pub(super) fn cache_get(key: &CacheKey) -> Option<SourceImage> {
     let mut c = cache();
     let i = c.iter().position(|e| e.key == *key)?;
-    let mut e = c.remove(i);
-    e.decodes = e.decodes.saturating_add(u32::from(decoded));
+    let e = c.remove(i);
     let img = e.image.clone();
     c.push(e);
     Some(img)
@@ -385,15 +386,13 @@ pub(super) fn cache_get_counted(key: &CacheKey, decoded: bool) -> Option<SourceI
 pub(super) fn source_image_in(file_name: &str, bytes: &[u8], fmt: PixelFormat, ctx: &JobCtx) -> Result<SourceImage> {
     ctx.check()?;
     let key = cache_key(bytes, fmt);
-    if let Some(image) = cache_get_without_preparation(&key) {
+    if let Some(image) = cache_get_authorized(&key, ctx)? {
         return Ok(image);
     }
-    let (doc, reusable) = decode_source_admitted_in(file_name, bytes, ctx)?;
-    if let Some(img) = cache_get_counted(&key, true) {
-        return Ok(img);
-    }
+    let recording = render_proof::start()?;
+    let doc = decode_source_admitted_in(file_name, bytes, ctx)?;
     let img = prepared_source_image(&doc, fmt, None, ctx)?;
-    cache_put(key, img.clone(), reusable, true);
+    cache_put(key, img.clone(), recording.finish(), true);
     Ok(img)
 }
 
@@ -412,9 +411,9 @@ mod tests {
         let key = cache_key(b"oversize", PixelFormat::RGBA8);
         let img = image(256);
         let bytes = super::super::stack_cache::surface_bytes(&img.surface);
-        cache_put_within(key, img.clone(), true, true, bytes - 1);
+        cache_put_within(key, img.clone(), Some(Proof::default()), true, bytes - 1);
         assert!(cache_get(&key).is_none(), "{bytes} bytes against a limit of {}", bytes - 1);
-        cache_put_within(key, img, true, true, bytes);
+        cache_put_within(key, img, Some(Proof::default()), true, bytes);
         assert!(cache_get(&key).is_some());
     }
 
@@ -436,5 +435,20 @@ mod tests {
         let bytes = super::super::stack_cache::surface_bytes(&img.surface);
         // 8-bit RGBA is 4 bytes a pixel (plus the default pixel), not the 16 of an f32 estimate.
         assert!((256 * 256 * 4..256 * 256 * 5).contains(&bytes), "{bytes}");
+    }
+
+    #[test]
+    fn authorization_parameters_are_charged_against_the_source_cache_limit() {
+        let recording = render_proof::start().unwrap();
+        crate::jobs::authorize_render_command("filter.unknown", &json!({"payload":"x".repeat(8192)})).unwrap();
+        let proof = recording.finish().unwrap();
+        assert!(proof.bytes() >= 8192);
+        let img = image(64);
+        let bytes = super::super::stack_cache::surface_bytes(&img.surface) + proof.bytes();
+        let key = cache_key(b"proof accounting", PixelFormat::RGBA8);
+        cache_put_within(key, img.clone(), Some(proof.clone()), true, bytes - 1);
+        assert!(cache_get(&key).is_none());
+        cache_put_within(key, img, Some(proof), true, bytes);
+        assert!(cache_get(&key).is_some());
     }
 }

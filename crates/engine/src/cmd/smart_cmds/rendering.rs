@@ -1,7 +1,7 @@
 use super::filters::smart;
 use super::source::{
-    SourceImage, cache_get_counted, cache_get_without_preparation, cache_key, cache_put, decode_source_admitted_in, flattened_source, source_bytes,
-    source_image, source_image_in, source_surface_from_buffer, svg_source_image, vector_scale,
+    SourceImage, cache_get_authorized, cache_key, cache_put, decode_source_admitted_in, flattened_source, source_bytes, source_image, source_image_in,
+    source_surface_from_buffer, svg_source_image, vector_scale,
 };
 use super::{
     Affine, Arc, BlendMode, Document, EngineError, Homography, JobCtx, Layer, LayerContent, LayerId, PixelFormat, Rect, Result, SmartFilter, SmartObject,
@@ -205,20 +205,18 @@ pub(super) fn refresh_or_fail_in(doc: &mut Document, id: LayerId, ctx: &JobCtx) 
     Err(other("the smart object's contents are unavailable (missing linked file?), so it can't be re-rendered"))
 }
 
-/// Decode and authorize the complete source before a cached stack result can be reused.
+/// Recheck a cached stack source's stored commands before reuse; cold sources record preparation checks.
 fn stack_image_in(file_name: &str, bytes: &[u8], fmt: PixelFormat, mode: photocraft_doc::StackMode, ctx: &JobCtx) -> Result<SourceImage> {
     ctx.check()?;
     let mut key = cache_key(bytes, fmt);
     key.0 = *blake3::hash(&[&key.0[..], b"stack:", mode.id().as_bytes()].concat()).as_bytes();
-    if let Some(image) = cache_get_without_preparation(&key) {
+    if let Some(image) = cache_get_authorized(&key, ctx)? {
         return Ok(image);
     }
-    let (doc, reusable) = decode_source_admitted_in(file_name, bytes, ctx)?;
-    if let Some(img) = cache_get_counted(&key, true) {
-        return Ok(img);
-    }
+    let recording = crate::jobs::render_proof::start()?;
+    let doc = decode_source_admitted_in(file_name, bytes, ctx)?;
     let img = prepared_source_image(&doc, fmt, Some(mode), ctx)?;
-    cache_put(key, img.clone(), reusable, true);
+    cache_put(key, img.clone(), recording.finish(), true);
     Ok(img)
 }
 

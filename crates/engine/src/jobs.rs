@@ -31,6 +31,8 @@ use crate::{EngineError, Result, Session};
 
 type Authorization = fn(&str, &Value) -> Result<()>;
 
+pub(crate) mod render_proof;
+
 thread_local! {
     // Smart-filter rendering has no Session argument. Carry the requesting session's gate
     // through synchronous rendering and explicitly reinstall it on background workers.
@@ -63,7 +65,8 @@ pub(crate) fn authorize_render_command(id: &str, params: &Value) -> Result<()> {
     match RENDER_AUTHORIZATION.with(std::cell::Cell::get) {
         Some(gate) => gate(id, params),
         None => Ok(()),
-    }
+    }?;
+    render_proof::record(id, params)
 }
 
 /// Whether the work on this thread is done for an untrusted session (a gate is installed).

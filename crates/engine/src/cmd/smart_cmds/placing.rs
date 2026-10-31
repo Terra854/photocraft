@@ -193,7 +193,7 @@ pub fn layers_to_smart(doc: &Document, name: &str, layers: Vec<Layer>) -> Result
     cache_put(
         cache_key(&bytes, fmt),
         SourceImage { surface: Arc::new(translate_surface(&cache, -b.x0, -b.y0)), bounds: sub.bounds() },
-        source_without_stored_commands(&sub, &JobCtx::new())?,
+        source_without_stored_commands(&sub, &JobCtx::new())?.then(crate::jobs::render_proof::Proof::default),
         false,
     );
 
