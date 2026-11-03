@@ -6,6 +6,8 @@ mod color;
 
 mod config;
 
+mod core_composites;
+
 mod curves_and_quantization;
 
 mod envelope;
@@ -538,6 +540,9 @@ pub(super) fn map(effect: &StoredEffect<'_>, context: &MappingContext) -> std::r
     tone::map(effect, context)
         .or_else(|| curves_and_quantization::map(effect, context))
         .or_else(|| color::map(effect, context))
+        .or_else(|| resources::map(effect, context))
+        .or_else(|| spatial::map(effect, context))
+        .or_else(|| core_composites::map(effect, context))
         .unwrap_or_else(|| Err(format!("Native mapping is unfinished for stored operation {}", effect.operation).into()))
 }
 
