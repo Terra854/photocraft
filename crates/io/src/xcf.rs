@@ -1,4 +1,4 @@
-//! GIMP XCF (`.xcf`, `.xcf.gz`) read. Layout from the public specification
+//! GIMP XCF (`.xcf`, `.xcf.gz`, `.xcf.bz2`, `.xcf.xz`) read. Layout from the public specification
 //! (https://developer.gimp.org/core/standards/xcf/, versions 0 to 26): a header, image
 //! properties, then pointers to layer, channel and path structures; each drawable's pixels sit in
 //! 64×64 tiles, uncompressed, RLE-coded or zlib-coded.
@@ -13,6 +13,8 @@
 //! Write: not supported (GIMP's own format; `.pcraft` keeps everything PhotoCraft holds).
 //!
 //! The reader is written from the specification and from files GIMP 3.2 writes; no GIMP code.
+
+pub(crate) mod transport;
 
 #[cfg(test)]
 mod tests;
@@ -68,12 +70,14 @@ pub(crate) fn is_xcf(bytes: &[u8]) -> bool {
 }
 
 /// `true` for a gzip stream named `.xcf.gz` / `.xcfgz` (GIMP writes and reads compressed XCF).
+#[cfg(test)]
 pub(crate) fn is_gzipped_xcf(name: &str, bytes: &[u8]) -> bool {
     let lower = name.rsplit(['/', '\\']).next().unwrap_or(name).to_ascii_lowercase();
     bytes.starts_with(&[0x1f, 0x8b]) && (lower.ends_with(".xcf.gz") || lower.ends_with(".xcfgz"))
 }
 
 /// Inflates a gzipped XCF, bounded.
+#[cfg(test)]
 pub(crate) fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut dec = flate2::read::GzDecoder::new(bytes).take(MAX_INFLATED as u64 + 1);

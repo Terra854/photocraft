@@ -511,6 +511,14 @@ pub fn import_file(name: &str, path: &std::path::Path, opts: &ImportOptions, ctl
 /// Dispatches format-specific importers and propagates a structured PSD damage
 /// flag alongside the ordinary best-effort import result.
 fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, opts: &ImportOptions, damaged: &mut bool) -> Result<ImportResult, IoError> {
+    // Import-only XCF content wins over misleading suffixes before native or raster routing.
+    if xcf::is_xcf(bytes) {
+        return xcf::import(name, bytes, ctl);
+    }
+    if xcf::transport::header_prefix(name, bytes, ctl)?.is_some() {
+        let decoded = xcf::transport::decode(name, bytes, ctl)?.ok_or_else(|| IoError::Xcf("the compressed input is not XCF".into()))?;
+        return xcf::import(name, &decoded, ctl);
+    }
     // A declared native extension must reach its loader so malformed bundles retain format errors.
     if has_extension(name, photocraft_format::EXTENSION) || photocraft_format::is_pcraft(bytes) {
         let document = photocraft_format::load_from_bytes(bytes)?;
@@ -536,11 +544,8 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
     }
     // GIMP files are gzip or raw; as above, a recognized raster signature still wins over a
     // misleading .xcf suffix.
-    if xcf::is_xcf(bytes) || (has_extension(name, "xcf") && photocraft_codecs::detect(bytes).is_none()) {
+    if has_extension(name, "xcf") && photocraft_codecs::detect(bytes).is_none() {
         return xcf::import(name, bytes, ctl);
-    }
-    if xcf::is_gzipped_xcf(name, bytes) {
-        return xcf::import(name, &xcf::gunzip(bytes)?, ctl);
     }
     if has_extension(name, "pdn") || bytes.starts_with(b"PDN3") {
         return pdn::import(name, bytes, ctl);
