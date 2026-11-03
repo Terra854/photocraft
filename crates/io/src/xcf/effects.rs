@@ -12,6 +12,9 @@ mod curves_and_quantization;
 
 mod envelope;
 
+#[allow(dead_code)]
+mod graph_schema;
+
 mod residual_coverage;
 
 mod residual_geometry;
