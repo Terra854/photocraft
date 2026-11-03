@@ -42,6 +42,7 @@ mod multichannel;
 mod native_vector_preview;
 mod orientation;
 mod pattern_fill_psd;
+mod pcraft_full_composite;
 mod pcraft_manifest_name;
 mod pdn_corpus;
 mod png_text_metadata;

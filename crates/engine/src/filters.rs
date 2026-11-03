@@ -324,6 +324,8 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
         &label,
         move |doc, _, ctx| {
             let filter = |surf: &photocraft_raster::Surface, fp: &FilterParams, area, bounds, sel: Option<&photocraft_raster::Surface>, extent| {
+                let _working = photocraft_raster::memory::try_reserve_operation(algo::working_bytes(fp, area, bounds, surf.format().channels()))
+                    .map_err(EngineError::Other)?;
                 if let FilterParams::Convolution(options) = fp {
                     return ctx
                         .stage(0.0, 1.0, &msg, |ctl| algo::convolution::apply_with(surf, options, area, extent, sel, ctl))

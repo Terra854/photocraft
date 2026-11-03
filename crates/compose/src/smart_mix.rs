@@ -9,7 +9,7 @@ use photocraft_color::{BlendMode, SampleType};
 use photocraft_geom::Rect;
 use photocraft_raster::{AllocationError, Interrupt, Surface};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Cancelled,
     Allocation(AllocationError),

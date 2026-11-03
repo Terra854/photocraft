@@ -14,7 +14,7 @@ pub const MAX_EDGE: u32 = 30_000;
 pub const MAX_PAINT_PIXELS: u64 = 1 << 26;
 
 /// A bounded, cancellable pattern hash could not be completed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatternBuildError {
     InvalidDimensions,
     ScratchLimit { required: usize, available: usize },
