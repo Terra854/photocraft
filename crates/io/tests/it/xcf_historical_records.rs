@@ -4,8 +4,11 @@
 //! GIMP_3_2_6 app/path/gimppath-compat.c: anchor1,control2,new-stroke3;
 //! the older prose table's0/1 tags conflict with that primary declaration.
 //! No historical source implementation or rendering algorithm is copied.
-use photocraft_doc::{Document, LayerContent, import_conversion::ImportConversion};
-use photocraft_geom::Rect;
+use photocraft_doc::{
+    Document, LayerContent,
+    import_conversion::{ConversionReason, ImportConversion},
+};
+use photocraft_geom::{Affine, Point, Rect};
 
 struct Wire {
     bytes: Vec<u8>,
@@ -61,7 +64,15 @@ impl Wire {
 fn words(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_be_bytes()).collect()
 }
-
+/// Constructs a named parasite record with explicit flags and payload length.
+fn parasite(name: &str, raw: &[u8]) -> Vec<u8> {
+    let mut w = Wire::empty();
+    w.string(name);
+    w.word(1);
+    w.word(raw.len() as u32);
+    w.bytes.extend(raw);
+    w.bytes
+}
 /// Builds a complete historical XCF fixture with controlled image, layer and parasite records.
 fn image(version: u32, image_props: &[(u32, Vec<u8>)], layer_props: &[(u32, Vec<u8>)]) -> Vec<u8> {
     let header = if version == 0 { "gimp xcf file\0".to_string() } else { format!("gimp xcf v{version:03}\0") };
@@ -128,6 +139,109 @@ fn roundtrip(doc: &Document) {
     assert!(reopened.layers == doc.layers, "native layers survive source-independent save/reopen");
     assert_eq!(reopened.paths, doc.paths);
     assert!(reopened.metadata == doc.metadata, "historical metadata survives native save/reopen");
+}
+
+#[test]
+/// Verifies preferred historical font/text records outrank a stale GDynText parasite without losing native
+/// typography.
+fn old_font_description_beats_stale_gdyntext_at_the_full_parasite_boundary() {
+    // The pre-resource font STRING and font-size have separate meanings. Point
+    // size stays18pt even though the historical font description ends in30.
+    let modern = r#"(text "Current hé") (font "Historical Serif Bold Italic 30") (font-size 18) (font-size-unit points)"#.as_bytes();
+    let old = br"GDT10{stale}{1}{0}{0}{0}{ffffff}{0}{-misc-fixed-medium-r-normal--12-120-75-75-p-100-iso8859-1}";
+    for reverse in [false, true] {
+        let mut configs = [parasite("gimp-text-layer", modern), parasite("plug_in_gdyntext/data", old)];
+        if reverse {
+            configs.reverse()
+        }
+        let doc = open(&image(0, &[], &[(21, configs.concat()), (26, words(&[1]))]));
+        let LayerContent::Text(text) = &doc.layers[0].content else { panic!("editable old-font text") };
+        assert_eq!(text.text, "Current hé");
+        assert_eq!(text.font_family, "Historical Serif");
+        assert_eq!(text.size_pt, 18.);
+        assert_eq!(text.transform, Affine::translate(-3., 7.));
+        assert_eq!(text.runs[0].style.weight, 700);
+        assert!(text.runs[0].style.italic);
+        assert!(text.cache.is_none());
+        roundtrip(&doc);
+    }
+}
+
+#[test]
+/// Checks Latin-1 GDynText decoding and invalid preferred records produce honest editable or raster outcomes.
+fn gdyntext_latin1_and_invalid_preferred_record_preserve_honest_native_outcomes() {
+    let old = br"GDT10{caf\351}{1}{0}{0}{0}{ffffff}{0}{-misc-fixed-medium-r-normal--16-120-75-75-p-100-iso8859-1}";
+    let old_property = parasite("plug_in_gdyntext/data", old);
+    let doc = open(&image(0, &[], &[(21, old_property.clone())]));
+    let LayerContent::Text(text) = &doc.layers[0].content else { panic!("editable legacy Latin1 text") };
+    assert_eq!(text.text, "café");
+    assert_eq!(text.font_family, "fixed");
+    assert_eq!(text.size_pt, 8.);
+    roundtrip(&doc);
+    let raw = [old_property, parasite("gimp-text-layer", b"(text \"preferred\") (font-size -2)")].concat();
+    let doc = open(&image(2, &[], &[(21, raw)]));
+    let LayerContent::Raster(pixels) = &doc.layers[0].content else { panic!("invalid preferred text keeps actual pixels, not stale text") };
+    assert_eq!(pixels.read_region(Rect::new(-3, 7, -2, 8)), [17. / 255., 31. / 255., 57. / 255., 1.]);
+    let Some(ImportConversion::Report(report)) = doc.metadata.import_conversion.as_deref() else { panic!("durable report") };
+    assert!(report.entries.iter().any(|e| e.feature_code == "xcf.text" && e.reason == ConversionReason::InvalidOptionalData));
+    roundtrip(&doc);
+}
+
+#[test]
+/// Verifies historical path versions preserve signed/fractional geometry and separate strokes through native
+/// persistence.
+fn legacy_paths_keep_signed_fractional_coordinates_and_new_stroke_partition_after_native_save() {
+    for record_version in [1, 2, 3] {
+        let shift = if record_version == 1 { 0. } else { 0.25 };
+        let mut path = Wire::empty();
+        path.word(0);
+        path.word(1);
+        path.string("Two old strokes");
+        path.word(1);
+        path.bytes.push(2);
+        for n in [0, 11, record_version] {
+            path.word(n)
+        }
+        if record_version >= 2 {
+            path.word(1)
+        }
+        if record_version == 3 {
+            path.word(77)
+        }
+        // Closed first stroke A,O,I,A,O,I; NEW_STROKE introduces a final open
+        // A,O,I,A,O stroke. Coordinates are independent original geometry.
+        for (kind, x, y) in [
+            (1, -7., 2.),
+            (2, -3., 3.),
+            (2, 2., 4.),
+            (1, 5., 6.),
+            (2, 8., 9.),
+            (2, -9., 0.),
+            (3, 11., 12.),
+            (2, 13., 14.),
+            (2, 15., 16.),
+            (1, 17., 18.),
+            (2, 19., 20.),
+        ] {
+            path.word(kind);
+            for value in [x + shift, y + shift] {
+                path.word(if record_version == 1 { (value as i32) as u32 } else { (value as f32).to_bits() })
+            }
+        }
+        let doc = open(&image(2, &[(23, path.bytes)], &[]));
+        assert_eq!(doc.paths.len(), 1);
+        let native = &doc.paths[0].path;
+        assert_eq!(native.subpaths.len(), 2);
+        assert!(native.subpaths[0].closed);
+        assert!(!native.subpaths[1].closed);
+        assert_eq!(native.subpaths[0].knots[0].anchor, Point::new(-7. + shift, 2. + shift));
+        assert_eq!(native.subpaths[0].knots[0].in_ctrl, Point::new(-9. + shift, shift));
+        assert_eq!(native.subpaths[1].knots[0].anchor, Point::new(11. + shift, 12. + shift));
+        assert_eq!(native.subpaths[1].knots[0].in_ctrl, native.subpaths[1].knots[0].anchor);
+        assert_eq!(native.subpaths[1].knots[1].in_ctrl, Point::new(15. + shift, 16. + shift));
+        assert_eq!(doc.layers[0].link_group, None, "pathlinked does not imply layer movement");
+        roundtrip(&doc);
+    }
 }
 
 #[test]

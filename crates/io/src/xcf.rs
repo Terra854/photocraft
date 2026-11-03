@@ -1383,6 +1383,7 @@ pub(crate) fn import_with_sample_order(
     })?;
     import_paths(&mut document, &mut image, &image_props, &path_ptrs, image_outcome, ctl)?;
     import_vectors(&mut document, &mut image, ctl)?;
+    text::convert_colors(&mut document)?;
     import_native_effects(&mut document, &mut image, ctl)?;
     add_document_warnings(&mut image, &document, precision, linear_compositing);
     image.initial_view.validate(&document)?;
@@ -1555,7 +1556,7 @@ fn import_paths<'a>(
         let paths = match if property.kind == 23 { paths::legacy(property.data) } else { paths::vectors(property.data) } {
             Ok(paths) => paths,
             Err(error) => {
-                unavailable_path(image, ordinal, property.offset, "", &error, Some(property.data))?;
+                unavailable_path(image, ordinal, property.offset, "", &error, None)?;
                 ordinal += 1;
                 continue;
             }
@@ -1625,19 +1626,18 @@ fn import_paths<'a>(
 /// Standalone record bytes need their own inert attachment; image properties
 /// already have one in the normal image-property retention pass.
 fn unavailable_path<'a>(image: &mut Image<'a>, ordinal: usize, offset: usize, name: &str, error: &IoError, raw: Option<&'a [u8]>) -> Result<()> {
-    let reason = if matches!(error, IoError::Unsupported(_)) { ConversionReason::MissingMapping } else { ConversionReason::InvalidOptionalData };
     let outcome = image.outcomes.push(ConversionEntry {
         feature_code: "xcf.path".into(),
         source: conversion::source("path", ordinal, offset, name, &[], None),
         targets: Vec::new(),
         disposition: ConversionDisposition::RetainedUnapplied,
-        reason,
+        reason: ConversionReason::InvalidOptionalData,
         source_description: format!("Optional saved path could not be translated: {error}"),
         native_description: "Usable native image content preserved; bounded saved-path configuration remains inert when the retention allowance permits".into(),
         attachments: Vec::new(),
     })?;
     if let Some(raw) = raw {
-        image.outcomes.property_with_reason(outcome, 25, offset, raw, reason)?;
+        image.outcomes.property_with_reason(outcome, 25, offset, raw, ConversionReason::InvalidOptionalData)?;
     }
     image.warnings.note("Optional saved paths could not be translated; usable pixels were preserved. See the conversion report");
     Ok(())
@@ -2090,7 +2090,7 @@ impl<'a> Image<'a> {
                         format!("Source text configuration could not be translated: {error}"),
                         "Stored pixels preserved as a native raster; source configuration remains inert".into(),
                     ),
-                    Some("has unsupported or invalid text layer configuration and opens as pixels"),
+                    Some("has unsupported or invalid text configuration and opens as pixels"),
                     &mut self.warnings,
                 )?,
             }

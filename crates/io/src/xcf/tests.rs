@@ -76,9 +76,65 @@ fn invalid_optional_saved_paths_preserve_pixels_and_configuration() {
         assert!(result.document.paths.is_empty());
         let report = result.document.metadata.import_conversion.as_deref().unwrap();
         let ImportConversion::Report(report) = report else { panic!("current report") };
-        assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.path" && entry.reason == ConversionReason::MissingMapping));
+        assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.path" && entry.reason == ConversionReason::InvalidOptionalData));
         assert!(report.attachments.iter().any(|attachment| attachment.bytes.as_slice() == raw));
     }
+}
+
+/// Skip an unknown framed path independently while retaining later native paths, source identities and image pixels.
+#[test]
+fn unknown_standalone_path_does_not_hide_later_paths_or_pixels() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    let mut w = W::new(26);
+    for value in [1, 1, 0, 150] {
+        w.u32(value);
+    }
+    w.prop(17, &[0]);
+    w.end();
+    let layer = w.slot();
+    w.ptr(0);
+    w.ptr(0);
+    let unknown = w.slot();
+    let known = w.slot();
+    w.ptr(0);
+    let at = w.out.len();
+    w.patch(layer, at);
+    for value in [1, 1, 1] {
+        w.u32(value);
+    }
+    w.string("Usable pixels");
+    w.end();
+    let raster = w.slot();
+    w.ptr(0);
+    w.ptr(0);
+    let at = hierarchy(&mut w, 1, 1, 4, &[17, 31, 57, 255], Compression::None);
+    w.patch(raster, at);
+    for (slot, version, name) in [(unknown, 99, "Future path"), (known, 1, "Native path")] {
+        let at = w.out.len();
+        w.patch(slot, at);
+        w.string(name);
+        let mut payload = W { out: Vec::new(), wide: false };
+        payload.prop(43, &[]);
+        payload.end();
+        payload.u32(version);
+        payload.u32(0); // Valid empty geometry in the supported path version.
+        w.u32(payload.out.len() as u32);
+        w.out.extend(payload.out);
+    }
+    let result = open(&w.out).unwrap();
+    assert_eq!(pixel(&result.document.layers[0], 0, 0), [17.0 / 255.0, 31.0 / 255.0, 57.0 / 255.0, 1.0]);
+    assert_eq!(result.document.paths.len(), 1);
+    assert_eq!(result.document.paths[0].name, "Native path");
+    assert_eq!(result.initial_view.unwrap().selected_path, Some(0));
+    let Some(ImportConversion::Report(report)) = result.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    let paths: Vec<_> = report.entries.iter().filter(|entry| entry.feature_code == "xcf.path").collect();
+    assert_eq!(paths.len(), 2);
+    assert_eq!((paths[0].source.ordinal, paths[1].source.ordinal), (0, 1));
+    assert!(report.attachments.iter().any(|attachment| attachment.owner.name == "Future path"));
+    let native = photocraft_format::save_to_bytes(&result.document, &Default::default()).unwrap();
+    let reopened = photocraft_format::load_from_bytes(&native).unwrap();
+    assert_eq!(reopened.paths, result.document.paths);
+    assert_eq!(reopened.metadata.import_conversion, result.document.metadata.import_conversion);
 }
 
 /// A small XCF writer for tests: version 11+ layout (64-bit pointers) by default.
@@ -1010,7 +1066,7 @@ fn unknown_configuration_is_retained_inertly_without_claiming_editable_source_fe
     assert!(report.entries.iter().any(|e| e.feature_code == "xcf.source_property.777" && e.disposition == D::RetainedUnapplied));
     assert!(report.entries.iter().any(|e| e.feature_code == "xcf.vector_layer"
         && e.disposition == D::NativeApproximation
-        && e.reason == photocraft_doc::import_conversion::ConversionReason::MissingMapping
+        && e.reason == photocraft_doc::import_conversion::ConversionReason::InvalidOptionalData
         && e.native_description.contains("native raster")));
     let saved = photocraft_format::save_to_bytes(&imported, &Default::default()).unwrap();
     let reopened = photocraft_format::load_from_bytes(&saved).unwrap();

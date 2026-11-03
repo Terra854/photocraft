@@ -4,9 +4,13 @@ mod config;
 
 mod envelope;
 
+mod resources;
+
 pub(super) use config::parse_config;
 
 pub(super) use envelope::{decode, read_pointers};
+
+pub(super) use resources::literal_rgb;
 
 /// One parsed effect; file order and argument order remain explicit.
 #[derive(Debug)]
