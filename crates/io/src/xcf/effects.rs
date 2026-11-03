@@ -12,6 +12,8 @@ mod curves_and_quantization;
 
 mod envelope;
 
+mod residual_geometry;
+
 mod residual_spatial;
 
 mod residual_tone;
@@ -543,6 +545,8 @@ pub(super) fn map(effect: &StoredEffect<'_>, context: &MappingContext) -> std::r
         .or_else(|| resources::map(effect, context))
         .or_else(|| spatial::map(effect, context))
         .or_else(|| residual_tone::map(effect, context))
+        .or_else(|| residual_geometry::map(effect, context))
+        .or_else(|| residual_spatial::map(effect, context))
         .or_else(|| core_composites::map(effect, context))
         .or_else(|| residual_transform::map(effect, context))
         .unwrap_or_else(|| Err(format!("Native mapping is unfinished for stored operation {}", effect.operation).into()))
