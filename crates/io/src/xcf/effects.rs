@@ -12,8 +12,16 @@ mod curves_and_quantization;
 
 mod envelope;
 
-#[allow(dead_code)]
+mod graph_composites;
+mod graph_core;
+mod graph_displacement;
+mod graph_math;
+mod graph_objects;
+mod graph_porter;
+mod graph_resources;
 mod graph_schema;
+mod graph_stock;
+mod graph_tone;
 
 mod residual_coverage;
 
