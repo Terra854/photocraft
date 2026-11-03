@@ -1922,7 +1922,101 @@ mod tests {
                 .is_err()
         );
     }
-
+    #[test]
+    /// Use transparent key pixels to prove inverse-alpha growth is unsafe, retaining original pixels and the
+    /// durable limitation report.
+    fn key_growth_inverse_counterexample_retains_source_pixels_and_report_after_reopen() {
+        use crate::xcf::tests::{W, hierarchy};
+        use photocraft_doc::import_conversion::{ConversionDisposition, ConversionReason, ImportConversion};
+        use photocraft_raster::Interrupt;
+        let r = Rect::new(0, 0, 5, 1);
+        let bytes = [0, 0, 255, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255, 255];
+        let mut input = Surface::new(PixelFormat::RGBA32F);
+        input.write_region(r, &bytes.iter().map(|v| f32::from(*v) / 255.).collect::<Vec<_>>());
+        let removed = photocraft_algo::apply_in_with(
+            &input,
+            &photocraft_algo::FilterParams::ColorToAlpha { color: [0., 0., 1., 1.], transparency_threshold: 0., opacity_threshold: 1. },
+            r,
+            r,
+            None,
+            r,
+            &Interrupt::NONE,
+        )
+        .unwrap();
+        assert_eq!(removed.pixel(0, 0)[3], 0.);
+        assert_eq!(removed.pixel(4, 0)[3], 0.);
+        let inverted = photocraft_algo::coverage::apply_with(
+            &removed,
+            photocraft_algo::coverage::Operation::AlphaCurve(&(0..256).map(|i| 1. - i as f32 / 255.).collect::<Vec<_>>()),
+            r,
+            r,
+            None,
+            &Interrupt::NONE,
+        )
+        .unwrap();
+        let grown = photocraft_algo::apply_in_with(
+            &inverted,
+            &photocraft_algo::FilterParams::Maximum { radius: 1., preserve: photocraft_algo::Preserve::Squareness },
+            r,
+            r,
+            None,
+            r,
+            &Interrupt::NONE,
+        )
+        .unwrap();
+        assert_eq!(grown.pixel(1, 0)[3], 1.);
+        assert_eq!(input.pixel(1, 0), vec![1., 1., 1., 1.]);
+        let mut w = W::new(26);
+        for value in [5, 1, 0, 150] {
+            w.u32(value);
+        }
+        w.prop(17, &[0]);
+        w.end();
+        let layer = w.slot();
+        w.ptr(0);
+        w.ptr(0);
+        w.ptr(0);
+        let at = w.out.len();
+        w.patch(layer, at);
+        for value in [5, 1, 1] {
+            w.u32(value);
+        }
+        w.string("Original key source");
+        w.end();
+        let pixels = w.slot();
+        w.ptr(0);
+        let effect = w.slot();
+        w.ptr(0);
+        let at = hierarchy(&mut w, 5, 1, 4, &bytes, crate::xcf::Compression::None);
+        w.patch(pixels, at);
+        let at = w.out.len();
+        w.patch(effect, at);
+        w.string("Original key propagation");
+        w.string("");
+        w.string("gegl:value-propagate");
+        w.string("0:0");
+        let mut argument = W { out: Vec::new(), wide: true };
+        argument.string("mode");
+        argument.u32(5);
+        argument.u32(4);
+        w.prop(45, &argument.out);
+        w.end();
+        w.ptr(0);
+        let imported = crate::xcf::import("key-limit.xcf", &w.out, &Interrupt::NONE).unwrap().document;
+        assert_eq!(imported.layers[0].surface().unwrap().read_region(r), input.read_region(r));
+        let ImportConversion::Report(report) = imported.metadata.import_conversion.as_deref().unwrap() else { panic!("native report") };
+        let entry = report.entries.iter().find(|entry| entry.feature_code == "xcf.layer_effect").unwrap();
+        assert_eq!(entry.disposition, ConversionDisposition::RetainedUnapplied);
+        assert_eq!(entry.reason, ConversionReason::NativeLimitation);
+        assert!(entry.native_description.contains("transparent/hidden-pixel key hits"));
+        assert!(
+            report.attachments.iter().any(|attachment| attachment.bytes.windows(b"gegl:value-propagate".len()).any(|window| window == b"gegl:value-propagate"))
+        );
+        let saved = photocraft_format::save_to_bytes(&imported, &Default::default()).unwrap();
+        let reopened = photocraft_format::load_from_bytes(&saved).unwrap();
+        assert_eq!(reopened.layers[0].surface().unwrap().read_region(r), input.read_region(r));
+        assert_eq!(reopened.metadata.import_conversion, imported.metadata.import_conversion);
+    }
     #[test]
     /// Demonstrate why translated layer blends cannot stand in for alpha-only neighborhood extrema without
     /// changing stored colors.

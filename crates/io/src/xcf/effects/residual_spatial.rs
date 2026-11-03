@@ -1763,7 +1763,84 @@ mod tests {
         assert_eq!(half.data[i], full.data[i]);
         assert_eq!(half.data[i + 1], full.data[i + 1]);
     }
-
+    /// Verifies independent derivative axes and fractional owner alpha against native constructions.
+    #[test]
+    fn normal_axes_keep_independent_native_values_and_fractional_source_alpha() {
+        use photocraft_color::{ColorMode, PixelFormat, SampleType};
+        use photocraft_doc::Document;
+        use photocraft_geom::Size;
+        use photocraft_raster::{Interrupt, Surface};
+        let b = Rect::new(0, 0, 3, 3);
+        let c = MappingContext { native_filter_bounds: b, owner_bounds: b, ..context() };
+        for alpha in [0.25, 0.5, 1.] {
+            let mut source = Surface::new(PixelFormat::RGBA32F);
+            for y in 0..3 {
+                for x in 0..3 {
+                    let value = (x + 2 * y) as f32 / 8.;
+                    source.write_pixel(x, y, &[value, value, value, alpha]);
+                }
+            }
+            let mapping = normal_map(&StoredEffect::test("gegl:normal-map", Vec::new()), &c).unwrap();
+            let Some(NativeStructure::Composite { branches }) = mapping.structure else { panic!("native normal axes") };
+            let mut doc = Document::new("Native independent derivative axes", Size::new(3, 3), ColorMode::Rgb, SampleType::F32);
+            for branch in branches {
+                let mut surface = source.clone();
+                for filter in branch.filters {
+                    if filter.command == "filter.other.custom" {
+                        let kernel: Vec<f32> = filter.params["kernel"].as_array().unwrap().iter().map(|n| n.as_f64().unwrap() as f32).collect();
+                        surface =
+                            photocraft_algo::apply_in(&surface, &photocraft_algo::FilterParams::Custom { kernel, scale: 4., offset: 127.5 }, b, b, None, b);
+                    } else if filter.command == "filter.other.setAlpha" {
+                        surface =
+                            photocraft_algo::coverage::apply_with(&surface, photocraft_algo::coverage::Operation::SetAlpha(1.), b, b, None, &Interrupt::NONE)
+                                .unwrap();
+                    } else {
+                        let monochrome = filter.params["monochrome"].as_bool().unwrap_or(false);
+                        let mut matrix = [[0.; 4]; 3];
+                        for (row, key) in matrix.iter_mut().zip(if monochrome { ["gray", "gray", "gray"] } else { ["red", "green", "blue"] }) {
+                            for (value, stored) in row.iter_mut().zip(filter.params[key].as_array().unwrap()) {
+                                *value = stored.as_f64().unwrap() as f32 / 100.;
+                            }
+                        }
+                        let adjustment = photocraft_doc::Adjustment::ChannelMixer { matrix, monochrome };
+                        let mut buffer = photocraft_compose::Buffer { rect: b, px: surface.read_region(b).as_chunks::<4>().0.to_vec() };
+                        photocraft_compose::adjust::apply_with(&adjustment, &mut buffer, photocraft_compose::adjust::Transfer::Gamma(1.));
+                        surface.write_region(b, &buffer.into_px().into_iter().flatten().collect::<Vec<_>>());
+                    }
+                }
+                let mut layer = Layer::new("Editable native derivative", LayerContent::Raster(surface));
+                layer.blend = branch.blend;
+                layer.clipped = branch.clipped;
+                doc.layers.push(layer);
+            }
+            let raw = photocraft_compose::render(&doc, b).into_px();
+            // Independent plane h=(x+2y)/8: centered differences are .25/.5;
+            // native Custom divides by4 and adds.5, independently of alpha.
+            for (actual, expected) in raw[4].into_iter().zip([0.5625, 0.625, 1., alpha]) {
+                assert!((actual - expected).abs() < 1e-6, "alpha{alpha}: {raw:?}");
+            }
+            let lut = photocraft_cms::lutfile::parse("normal.cube", mapping.filters[0].params["data"].as_str().unwrap().as_bytes()).unwrap();
+            let mut buffer = photocraft_compose::Buffer { rect: b, px: raw };
+            photocraft_compose::adjust::apply(
+                &photocraft_doc::Adjustment::ColorLookup {
+                    name: "Native vector".into(),
+                    lut: Some(std::sync::Arc::new(lut.data)),
+                    size: 17,
+                    tetrahedral: true,
+                    dither: false,
+                    source: None,
+                },
+                &mut buffer,
+            );
+            let norm = (1.25f32.powi(2) + 2.5f32.powi(2) + 1.).sqrt();
+            for (actual, expected) in buffer.px[4].into_iter().zip([0.5 + 0.5 * 1.25 / norm, 0.5 + 0.5 * 2.5 / norm, 0.5 + 0.5 / norm, alpha]) {
+                assert!((actual - expected).abs() < 1e-5);
+            }
+            let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+            let reopened = photocraft_format::load_from_bytes(&bytes).unwrap();
+            assert_eq!(photocraft_compose::render(&doc, b).px, photocraft_compose::render(&reopened, b).px);
+        }
+    }
     /// Checks Gray owners use private native RGB working contents while preserving the outer Gray document and persistence.
     #[test]
     fn gray_normal_vectors_reuse_native_rgb_contents_and_keep_outer_gray_data() {
@@ -2179,7 +2256,144 @@ mod tests {
         let both = result("gegl:image-gradient", vec![enm("output-mode", 2)]);
         assert_eq!(both.filters, result("gegl:image-gradient", Vec::new()).filters, "observed drawable Both is magnitude, not invented RGB vector data");
     }
-
+    /// Verifies the actual native derivative basis and coverage policy, including rejected unsupported domains.
+    #[test]
+    fn gradient_direction_native_derivative_basis_clipped_alpha_and_bounded_domains() {
+        use photocraft_color::{PixelFormat, SampleType};
+        use photocraft_doc::Document;
+        use photocraft_geom::Size;
+        use photocraft_raster::{Interrupt, Surface};
+        let mapped = result("gegl:image-gradient", vec![enm("output-mode", 1)]);
+        let Some(NativeStructure::Composite { branches }) = mapped.structure else { panic!("native derivative branches") };
+        assert_eq!(branches.len(), 2);
+        assert!(branches[1].clipped);
+        let b = Rect::new(0, 0, 5, 5);
+        let mut source = Surface::new(PixelFormat::RGBA32F);
+        let pixels: Vec<_> = (0..5).flat_map(|_| (0..5).flat_map(|x| [x as f32 / 4., x as f32 / 4., x as f32 / 4., 0.5])).collect();
+        source.write_region(b, &pixels);
+        let mut monochrome = photocraft_compose::Buffer { rect: b, px: pixels.as_chunks::<4>().0.to_vec() };
+        photocraft_compose::adjust::apply_depth(
+            &photocraft_doc::Adjustment::ChannelMixer { matrix: [[0.2126, 0.7152, 0.0722, 0.]; 3], monochrome: true },
+            &mut monochrome,
+            photocraft_compose::adjust::Transfer::Gamma(1.),
+            Some(SampleType::F32),
+        );
+        source.write_region(b, &monochrome.px.iter().flatten().copied().collect::<Vec<_>>());
+        let mut doc = Document::new("Native derivative axes", Size::new(5, 5), ColorMode::Rgb, SampleType::F32);
+        doc.icc_profile = Some(photocraft_cms::Builtin::LinearSrgb.profile().to_bytes());
+        for (axis, branch) in branches.iter().enumerate() {
+            let custom = &branch.filters[1].params;
+            let kernel = custom["kernel"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let mut surface = photocraft_algo::apply_in_with(
+                &source,
+                &photocraft_algo::FilterParams::Custom { kernel, scale: 2., offset: 127.5 },
+                b,
+                b,
+                None,
+                b,
+                &Interrupt::NONE,
+            )
+            .unwrap();
+            assert!((surface.pixel(2, 2)[0] - if axis == 0 { 0.75 } else { 0.5 }).abs() < 0.002);
+            let routed: Vec<_> =
+                surface.read_region(b).as_chunks::<4>().0.iter().flat_map(|p| if axis == 0 { [p[0], 0., 0., p[3]] } else { [0., p[0], 0., p[3]] }).collect();
+            surface.write_region(b, &routed);
+            if axis != 0 {
+                assert_eq!(branch.filters[3].command, "filter.other.setAlpha");
+                surface =
+                    photocraft_algo::coverage::apply_with(&surface, photocraft_algo::coverage::Operation::SetAlpha(1.), b, b, None, &Interrupt::NONE).unwrap();
+            }
+            let mut layer = Layer::new("Editable native axis", LayerContent::Raster(surface));
+            layer.blend = branch.blend;
+            layer.clipped = branch.clipped;
+            doc.layers.push(layer);
+        }
+        let rendered = photocraft_compose::render(&doc, b);
+        let center = rendered.px[12];
+        assert!((center[0] - 0.75).abs() < 0.002);
+        assert!((center[1] - 0.5).abs() < 1e-6, "{center:?}");
+        assert_eq!(center[3], 0.5);
+        for c in [MappingContext { remaining_generation_bytes: 1, ..context() }, MappingContext { remaining_metadata_bytes: 1, ..context() }] {
+            assert!(map(&StoredEffect::test("gegl:image-gradient", vec![enm("output-mode", 1)]), &c).unwrap().is_err());
+        }
+        let cancel = || true;
+        let cancelled = MappingContext { interrupt: Interrupt::cancel_only(&cancel), ..context() };
+        assert!(map(&StoredEffect::test("gegl:image-gradient", vec![enm("output-mode", 1)]), &cancelled).unwrap().is_err());
+        let gray = MappingContext { mode: ColorMode::Grayscale, ..context() };
+        let gray_native = map(&StoredEffect::test("gegl:image-gradient", vec![enm("output-mode", 1)]), &gray).unwrap().unwrap();
+        assert!(gray_native.working_rgb);
+        assert_eq!(gray_native.filters, mapped.filters);
+        assert!(matches!(gray_native.structure, Some(NativeStructure::Composite { .. })));
+        assert!(map(&StoredEffect::test("gegl:image-gradient", vec![enm("output-mode", 99)]), &context()).unwrap().is_err());
+    }
+    /// Materializes native screening branches for rendering comparisons without evaluating a source operation.
+    fn screen_native_document(mapping: NativeMapping, depth: photocraft_color::SampleType) -> photocraft_doc::Document {
+        use photocraft_color::PixelFormat;
+        use photocraft_doc::adjust::Adjustment;
+        use photocraft_raster::{Interrupt, Surface};
+        let b = Rect::new(0, 0, 8, 8);
+        let mut source = Surface::new(PixelFormat::new(ColorMode::Rgb, depth, true));
+        for y in 0..8 {
+            for x in 0..8 {
+                source.write_pixel(x, y, &[0.5, 0.5, 0.5, [0., 0.25, 0.5, 1.][x as usize % 4]]);
+            }
+        }
+        let mut doc = photocraft_doc::Document::new("Native screen pipeline", photocraft_geom::Size::new(8, 8), ColorMode::Rgb, depth);
+        doc.icc_profile = Some(photocraft_cms::Builtin::Srgb.profile().to_bytes());
+        doc.patterns = mapping.patterns;
+        let Some(NativeStructure::Composite { branches }) = mapping.structure else { panic!("native screen structure") };
+        for branch in branches {
+            let mut pixels = source.clone();
+            for filter in branch.filters {
+                if filter.command == "filter.other.setAlpha" {
+                    pixels = photocraft_algo::coverage::apply_with(&pixels, photocraft_algo::coverage::Operation::SetAlpha(1.), b, b, None, &Interrupt::NONE)
+                        .unwrap();
+                    continue;
+                }
+                let adj = if filter.command == "image.adjustments.channelMixer" {
+                    let mono = filter.params["monochrome"].as_bool().unwrap_or(false);
+                    let matrix = std::array::from_fn(|row| {
+                        std::array::from_fn(|column| {
+                            filter.params[if mono { "gray" } else { ["red", "green", "blue"][row] }][column].as_f64().unwrap_or(0.) as f32 / 100.
+                        })
+                    });
+                    Adjustment::ChannelMixer { matrix, monochrome: mono }
+                } else if filter.command == "image.adjustments.colorLookup" {
+                    let table = photocraft_cms::lutfile::parse("native.cube", filter.params["data"].as_str().unwrap().as_bytes()).unwrap();
+                    Adjustment::ColorLookup {
+                        name: "Native ink".into(),
+                        size: table.size as u32,
+                        lut: Some(std::sync::Arc::new(table.data)),
+                        tetrahedral: true,
+                        dither: false,
+                        source: None,
+                    }
+                } else if filter.command == "image.adjustments.curves" {
+                    crate::xcf::coverage::adjustment(&filter.command, &filter.params).unwrap()
+                } else {
+                    assert_eq!(filter.command, "image.adjustments.invert");
+                    Adjustment::Invert
+                };
+                let mut buffer =
+                    photocraft_compose::Buffer { rect: b, px: (0..8).flat_map(|y| (0..8).map(move |x| (x, y))).map(|(x, y)| pixels.rgba(x, y)).collect() };
+                photocraft_compose::adjust::apply_in(
+                    &adj,
+                    &mut buffer,
+                    photocraft_compose::adjust::Transfer::for_document(ColorMode::Rgb, depth),
+                    Some(depth),
+                    ColorMode::Rgb,
+                );
+                pixels = Surface::new(source.format());
+                pixels.write_region(b, &buffer.into_px().into_iter().flatten().collect::<Vec<_>>());
+            }
+            let mut layer = Layer::new("Ordinary native screened pixels", LayerContent::Raster(pixels));
+            layer.blend = branch.blend;
+            layer.clipped = branch.clipped;
+            layer.effects.items = branch.layer_effects;
+            doc.layers.push(layer);
+        }
+        doc
+    }
     /// Checks each mirrored instance crops its input before placement and retains that order through native storage.
     #[test]
     fn mirrors_crop_is_inside_each_native_instance_before_fold_and_survives_native_storage() {
@@ -2226,6 +2440,135 @@ mod tests {
             .join(" ")
     }
 
+    /// Compares converted screening with an independent native Hard Mix construction and checks coverage and persistence.
+    #[test]
+    fn newsprint_native_hardmix_counterpart_preserves_coverage_at_all_depths_and_reopens() {
+        use photocraft_color::{PixelFormat, SampleType};
+        use photocraft_raster::Surface;
+        for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+            let converted = result("gegl:newsprint", vec![float("period", 8.), float("angle", 0.)]);
+            let actual = screen_native_document(converted, depth);
+            // Independently author the ordinary native counterpart: black base
+            // preserving original alpha plus opaque .5 image clipped through a
+            // native Hard Mix Pattern Overlay with a linear threshold ramp.
+            let mut expected = photocraft_doc::Document::new("Manual native line screen", photocraft_geom::Size::new(8, 8), ColorMode::Rgb, depth);
+            expected.icc_profile = actual.icc_profile.clone();
+            let mut base = Surface::new(PixelFormat::new(ColorMode::Rgb, depth, true));
+            let mut opaque = Surface::new(base.format());
+            for y in 0..8 {
+                for x in 0..8 {
+                    base.write_pixel(x, y, &[0., 0., 0., [0., 0.25, 0.5, 1.][x as usize % 4]]);
+                    opaque.write_pixel(x, y, &[0.5, 0.5, 0.5, 1.]);
+                }
+            }
+            expected.layers.push(Layer::new("Manual original alpha", LayerContent::Raster(base.clone())));
+            let mut ramp = Surface::new(PixelFormat::new(ColorMode::Grayscale, SampleType::F32, false));
+            for y in 0..64 {
+                ramp.fill_rect(Rect::new(0, y, 64, y + 1), &[(y as f32 + 0.5) / 64.]);
+            }
+            let pattern = photocraft_doc::Pattern::new("Independent native threshold ramp", ramp, 64, 64);
+            let mut screen = Layer::new("Manual opaque native screen", LayerContent::Raster(opaque));
+            screen.clipped = true;
+            screen.effects.items.push(Effect::PatternOverlay {
+                common: FxCommon::new(BlendMode::HardMix, 1.),
+                name: pattern.name.clone(),
+                id: pattern.id.clone(),
+                scale: 0.125,
+                angle: 0.,
+                link: false,
+                phase: (0., 0.),
+            });
+            expected.patterns.push(pattern);
+            expected.layers.push(screen);
+            let rendered = photocraft_compose::render(&actual, actual.bounds());
+            let reference = photocraft_compose::render(&expected, expected.bounds());
+            for (index, (pixel, wanted)) in rendered.px.iter().zip(&reference.px).enumerate() {
+                assert_eq!(
+                    pixel,
+                    wanted,
+                    "{depth:?}/{index}: source={:?}, tile={:?}, style={:?}",
+                    actual.layers[1].surface().unwrap().rgba(1, 5),
+                    actual.patterns[0].surface.pixel(0, 40),
+                    actual.layers[1].effects.items
+                );
+            }
+            for y in 0..8 {
+                for x in 0..8 {
+                    let p = rendered.get(x, y);
+                    let alpha = base.rgba(x, y)[3];
+                    assert_eq!(p[3], alpha, "{depth:?}/{x}/{y}");
+                    let value = if y >= 4 && alpha > 0. { 1. } else { 0. };
+                    assert_eq!(p[..3], [value; 3], "{depth:?}/{x}/{y}");
+                }
+            }
+            let bytes = photocraft_format::save_to_bytes(&actual, &Default::default()).unwrap();
+            let reopened = photocraft_format::load_from_bytes(&bytes).unwrap();
+            assert_eq!(photocraft_compose::render(&reopened, reopened.bounds()).px, rendered.px);
+            assert!(matches!(reopened.layers[1].effects.items[0], Effect::PatternOverlay { .. }));
+            assert_eq!(reopened.patterns.len(), 1);
+        }
+    }
+    /// Checks independent ink plates, native pattern/profile data and actual resource admission limits.
+    #[test]
+    fn newsprint_independent_plates_patterns_cmyk_profile_and_actual_budgets_are_native() {
+        use photocraft_color::SampleType;
+        let rgb = result(
+            "gegl:newsprint",
+            vec![
+                enm("color-model", 2),
+                float("period2", 4.),
+                float("period3", 8.),
+                float("period4", 16.),
+                enm("pattern2", 2),
+                enm("pattern3", 3),
+                enm("pattern4", 4),
+                float("angle2", 0.),
+                float("angle3", 30.),
+                float("angle4", 60.),
+            ],
+        );
+        let Some(NativeStructure::Composite { branches }) = &rgb.structure else { panic!("native RGB plates") };
+        assert_eq!(branches.len(), 4);
+        assert_eq!(rgb.patterns.len(), 3);
+        for ((branch, period), angle) in branches.iter().skip(1).zip([4., 8., 16.]).zip([0., 30., 60.]) {
+            assert!(branch.clipped);
+            assert_eq!(branch.blend, BlendMode::LinearDodge);
+            let Effect::PatternOverlay { scale, angle: a, ref common, .. } = branch.layer_effects[0] else { panic!("native plate screen") };
+            assert_eq!(scale, period / 64.);
+            assert_eq!(a, angle);
+            assert_eq!(common.blend, BlendMode::HardMix);
+        }
+        let output = screen_native_document(rgb, SampleType::F32);
+        assert!(photocraft_compose::render(&output, output.bounds()).px.iter().all(|p| p[3] <= 1.));
+        let make = |pullout| result("gegl:newsprint", vec![enm("color-model", 3), float("black-pullout", pullout)]);
+        let cmyk = make(1.);
+        let none = make(0.);
+        let (Some(NativeStructure::Composite { branches: full }), Some(NativeStructure::Composite { branches: zero })) = (&cmyk.structure, &none.structure)
+        else {
+            panic!("native CMYK plates")
+        };
+        assert_eq!(full.len(), 5);
+        assert!(full.iter().skip(1).all(|p| p.clipped && p.blend == BlendMode::Multiply));
+        assert_ne!(full[4].filters[0].params["data"], zero[4].filters[0].params["data"]);
+        let rendered = photocraft_compose::render(&screen_native_document(cmyk, SampleType::F32), Rect::new(0, 0, 8, 8));
+        for x in 0..8 {
+            assert_eq!(rendered.get(x, 0)[3], [0., 0.25, 0.5, 1.][x as usize % 4]);
+        }
+        let small = MappingContext { remaining_generation_bytes: 1, ..context() };
+        assert!(map(&StoredEffect::test("gegl:newsprint", Vec::new()), &small).unwrap().is_err());
+        let small = MappingContext { remaining_metadata_bytes: 1, ..context() };
+        assert!(map(&StoredEffect::test("gegl:newsprint", Vec::new()), &small).unwrap().is_err());
+        let cancel = || true;
+        let c = MappingContext { interrupt: photocraft_raster::Interrupt::cancel_only(&cancel), ..context() };
+        assert!(map(&StoredEffect::test("gegl:newsprint", Vec::new()), &c).unwrap().is_err());
+        let zero = result("gegl:newsprint", vec![float("period", 0.), enm("pattern", 3)]);
+        assert!(zero.patterns.is_empty());
+        let gray = MappingContext { mode: ColorMode::Grayscale, ..context() };
+        let gray = map(&StoredEffect::test("gegl:newsprint", vec![enm("color-model", 3)]), &gray).unwrap().unwrap();
+        assert!(gray.working_rgb);
+        assert!(gray.notes[0].contains("ordinary RGB/sRGB Smart working contents"));
+    }
+
     /// Verifies bins are deliberately superseded by native estimation while radius and exponent retain meaningful native controls.
     #[test]
     fn oil_histogram_resolution_is_superseded_native_policy_and_controls_have_native_purpose() {
@@ -2267,6 +2610,87 @@ mod tests {
         assert!(map(&StoredEffect::test("gegl:oilify", Vec::new()), &cancelled).unwrap().is_err());
         for args in [vec![int("intensities", 7)], vec![int("mask-radius", 101)], vec![int("exponent", 0)], vec![float("intensities", 8.5)]] {
             assert!(map(&StoredEffect::test("gegl:oilify", args), &context()).unwrap().is_err());
+        }
+    }
+    /// Confirms joint versus component painting produces distinct native results while preserving alpha and native persistence.
+    #[test]
+    fn oil_joint_and_independent_native_fields_differ_preserve_alpha_and_reopen_at_each_depth() {
+        use photocraft_color::{PixelFormat, SampleType};
+        use photocraft_doc::{Document, SmartObject, SmartSource};
+        use photocraft_geom::Size;
+        use photocraft_raster::{Interrupt, Surface};
+        let joint = result("gegl:oilify", Vec::new());
+        let separate = result("gegl:oilify", vec![Argument { name: "use-inten", value: ArgumentValue::Bool(false) }]);
+        let Some(NativeStructure::Composite { branches }) = separate.structure else { panic!("native independent fields") };
+        let b = Rect::new(0, 0, 9, 7);
+        let p = &joint.filters[0].params;
+        let options = photocraft_algo::FilterParams::OilPaint {
+            stylization: p["stylization"].as_f64().unwrap() as f32,
+            cleanliness: p["cleanliness"].as_f64().unwrap() as f32,
+            scale: 1.,
+            bristle_detail: 0.,
+            lighting: false,
+            angle: 0.,
+            shine: 0.,
+        };
+        for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+            let mut source = Surface::new(PixelFormat::new(ColorMode::Rgb, depth, true));
+            let pixels: Vec<_> = (0..7)
+                .flat_map(|y| (0..9).flat_map(move |x| [x as f32 / 8., y as f32 / 6., if (x + y) % 3 == 0 { 1. } else { 0. }, [0.25, 0.5, 0.75][(x + y) % 3]]))
+                .collect();
+            source.write_region(b, &pixels);
+            let painted = photocraft_algo::apply_in_with(&source, &options, b, b, None, b, &Interrupt::NONE).unwrap();
+            let mut doc = Document::new("Native independent component strokes", Size::new(9, 7), ColorMode::Rgb, depth);
+            doc.icc_profile = Some(photocraft_cms::Builtin::LinearSrgb.profile().to_bytes());
+            for (axis, branch) in branches.iter().enumerate() {
+                let mut isolated = source.clone();
+                let gray: Vec<_> =
+                    source.read_region(b).as_chunks::<4>().0.iter().flat_map(|pixel| [pixel[axis], pixel[axis], pixel[axis], pixel[3]]).collect();
+                isolated.write_region(b, &gray);
+                let mut isolated = photocraft_algo::apply_in_with(&isolated, &options, b, b, None, b, &Interrupt::NONE).unwrap();
+                let routed: Vec<_> = isolated
+                    .read_region(b)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|pixel| {
+                        let mut out = [0., 0., 0., pixel[3]];
+                        out[axis] = pixel[0];
+                        out
+                    })
+                    .collect();
+                isolated.write_region(b, &routed);
+                if axis != 0 {
+                    isolated =
+                        photocraft_algo::coverage::apply_with(&isolated, photocraft_algo::coverage::Operation::SetAlpha(1.), b, b, None, &Interrupt::NONE)
+                            .unwrap();
+                }
+                let mut layer = Layer::new("Native painted component", LayerContent::Raster(isolated));
+                layer.blend = branch.blend;
+                layer.clipped = branch.clipped;
+                doc.layers.push(layer);
+            }
+            let before = photocraft_compose::render(&doc, b).into_px();
+            assert!(
+                before.iter().zip(painted.read_region(b).as_chunks::<4>().0).any(|(a, b)| a[..3].iter().zip(&b[..3]).any(|(a, b)| (a - b).abs() > 0.005)),
+                "native common vs independent fields must distinguish use-inten at{depth:?}"
+            );
+            for (index, pixel) in before.iter().enumerate() {
+                assert!((pixel[3] - source.pixel((index % 9) as i32, (index / 9) as i32)[3]).abs() < 1e-6);
+                assert!(pixel.iter().all(|v| v.is_finite()));
+            }
+            let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+            let reopened = photocraft_format::load_from_bytes(&bytes).unwrap();
+            assert_eq!(photocraft_compose::render(&reopened, b).px, before);
+            let mut smart =
+                SmartObject::new(SmartSource::Embedded { file_name: "paint.pcraft".into(), bytes: std::sync::Arc::new(bytes) }, Affine::IDENTITY, None);
+            smart.smart_filters = branches[1].filters.clone();
+            doc.layers.clear();
+            doc.layers.push(Layer::new("Editable native component paint", LayerContent::Smart(smart)));
+            let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+            let reopened = photocraft_format::load_from_bytes(&bytes).unwrap();
+            let LayerContent::Smart(smart) = &reopened.layers[0].content else { panic!("native smart") };
+            assert_eq!(smart.smart_filters, branches[1].filters);
         }
     }
 }
