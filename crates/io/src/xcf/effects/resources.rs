@@ -646,7 +646,31 @@ mod tests {
         let ambiguous = [0.25f32, 0.5, 0.75, 1.].into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>();
         assert!(literal_rgb(&ColorLiteral { encoding: "RGBA float", pixels: &ambiguous, profile: &[] }).unwrap_err().contains("byte-order"));
     }
-
+    #[test]
+    /// Require shared literal validation across direct resource readers rather than divergent acceptance
+    /// rules.
+    fn direct_color_readers_accept_the_same_validated_portable_literals() {
+        let context = context();
+        let colorize = StoredEffect::test("gimp:colorize", vec![portable("color", [0.125, 0.25, 0.5, 0.375], true)]);
+        assert!(super::super::color::map(&colorize, &context).unwrap().is_ok());
+        let lens = StoredEffect::test("gegl:apply-lens", vec![portable("background-color", [0.125, 0.25, 0.5, 0.375], true)]);
+        assert!(super::super::residual_tone::map(&lens, &context).unwrap().is_ok());
+        let checker = StoredEffect::test("gegl:checkerboard", vec![portable("color1", [0.125, 0.25, 0.5, 0.375], false)]);
+        assert!(super::super::residual_tone::map(&checker, &context).unwrap().is_ok());
+        let sinus = StoredEffect::test("gegl:sinus", vec![portable("color1", [0.125, 0.25, 0.5, 0.375], false)]);
+        assert!(super::super::residual_transform::map(&sinus, &context).unwrap().is_ok());
+        for (operation, name) in
+            [("gimp:colorize", "color"), ("gegl:apply-lens", "background-color"), ("gegl:checkerboard", "color1"), ("gegl:sinus", "color1")]
+        {
+            let invalid = StoredEffect::test(operation, vec![portable(name, [f32::NAN, 0., 0., 1.], false)]);
+            let result = match operation {
+                "gimp:colorize" => super::super::color::map(&invalid, &context),
+                "gegl:sinus" => super::super::residual_transform::map(&invalid, &context),
+                _ => super::super::residual_tone::map(&invalid, &context),
+            };
+            assert!(result.unwrap().is_err(), "{operation} must validate a consumed literal");
+        }
+    }
     #[test]
     /// Accept the byte-order-invariant all-zero float default without guessing the encoding of other
     /// native-endian float blobs.

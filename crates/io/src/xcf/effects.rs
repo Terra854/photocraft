@@ -542,7 +542,9 @@ pub(super) fn map(effect: &StoredEffect<'_>, context: &MappingContext) -> std::r
         .or_else(|| color::map(effect, context))
         .or_else(|| resources::map(effect, context))
         .or_else(|| spatial::map(effect, context))
+        .or_else(|| residual_tone::map(effect, context))
         .or_else(|| core_composites::map(effect, context))
+        .or_else(|| residual_transform::map(effect, context))
         .unwrap_or_else(|| Err(format!("Native mapping is unfinished for stored operation {}", effect.operation).into()))
 }
 
