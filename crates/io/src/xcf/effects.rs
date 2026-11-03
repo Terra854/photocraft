@@ -1,14 +1,28 @@
-//! Typed native construction data; source mapping families are added separately.
+//! Stored configuration translated once into ordinary native data.
 
 use photocraft_doc::SmartFilter;
 
+mod color;
+
 mod config;
 
+mod curves_and_quantization;
+
 mod envelope;
+
+mod residual_spatial;
+
+mod residual_tone;
+
+mod residual_transform;
 
 mod resources;
 
 mod schema;
+
+mod spatial;
+
+mod tone;
 
 pub(super) use config::parse_config;
 
@@ -521,5 +535,53 @@ pub(super) fn map(effect: &StoredEffect<'_>, context: &MappingContext) -> std::r
             return Err(format!("Stored operation argument {} is not mapped for {}", argument.name, effect.operation).into());
         }
     }
-    Err(format!("Native mapping is unfinished for stored operation {}", effect.operation).into())
+    tone::map(effect, context)
+        .or_else(|| curves_and_quantization::map(effect, context))
+        .or_else(|| color::map(effect, context))
+        .unwrap_or_else(|| Err(format!("Native mapping is unfinished for stored operation {}", effect.operation).into()))
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use photocraft_doc::import_conversion::ConversionReason;
+
+    /// Build a bounded native mapping context with deterministic mode, profile, geometry and interrupt settings for unit tests.
+    fn context() -> MappingContext<'static> {
+        MappingContext {
+            mode: photocraft_color::ColorMode::Rgb,
+            linear: false,
+            owner_bounds: photocraft_geom::Rect::new(0, 0, 2, 1),
+            native_filter_bounds: photocraft_geom::Rect::new(0, 0, 2, 1),
+            target_profile: None,
+            resolution_dpi: 72.0,
+            remaining_generation_bytes: crate::xcf::MAX_PIXEL_BYTES,
+            remaining_metadata_bytes: crate::xcf::MAX_METADATA_BYTES,
+            interrupt: photocraft_raster::Interrupt::NONE,
+        }
+    }
+
+    /// Verify unknown source fields and operation versions cannot be silently replaced by a native default mapping.
+    #[test]
+    fn unknown_stored_controls_are_never_silently_applied_as_native_defaults() {
+        for operation in ["gegl:grid", "gegl:video-degradation", "gegl:gaussian-blur", "gimp:fill-source"] {
+            let effect = StoredEffect::test(operation, vec![Argument { name: "future-control", value: ArgumentValue::Float(0.75) }]);
+            let failure = map(&effect, &context()).unwrap_err();
+            assert_eq!(failure.reason, ConversionReason::MissingMapping, "{operation}");
+            assert!(failure.message.contains("future-control"));
+        }
+    }
+
+    /// Reject duplicate stored arguments while preserving only the deliberately admitted schema aliases.
+    #[test]
+    fn duplicate_known_arguments_are_invalid_but_schema_aliases_are_explicit() {
+        let effect = StoredEffect::test(
+            "gegl:gaussian-blur",
+            vec![Argument { name: "std-dev-x", value: ArgumentValue::Float(1.0) }, Argument { name: "std-dev-x", value: ArgumentValue::Float(2.0) }],
+        );
+        assert_eq!(map(&effect, &context()).unwrap_err().reason, ConversionReason::InvalidOptionalData);
+        assert_eq!(schema::fields("gegl:motion-blur"), schema::fields("gegl:motion-blur-linear"));
+        assert_eq!(schema::fields("gegl:invert"), schema::fields("gegl:invert-linear"));
+        assert!(schema::fields("user-installed:operation").is_none());
+    }
 }
