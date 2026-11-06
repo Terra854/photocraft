@@ -20,6 +20,7 @@ fn held(name: &str, view: NativeInitialView) -> Held {
         warnings: Vec::new(),
         bytes: None,
         slot: None,
+        order: None,
         question: None,
         policy_applied: true,
         color_settings: None,
@@ -254,4 +255,25 @@ fn held_policy_without_question_uses_captured_working_space() {
         assert_eq!(app.session.color.settings.working_rgb, "adobe-rgb-compat");
         assert_eq!(app.session.prefs().file_handling.ignore_exif_profile_tag, !ignore_exif);
     }
+}
+
+#[test]
+/// A historical cancellation leaves the intervening memory prompt ahead of a later decoded file.
+fn historical_and_memory_prompts_keep_arrival_order_through_stale_memory_failure() {
+    let (mut app, fields, _) = historical_app(false);
+    arrive_memory(&mut app, u64::MAX, "Memory.psd".into(), None, None, None, 1 << 30, None, true, false);
+    arrive(&mut app, held("B.pcraft", NativeInitialView::default()));
+    assert_eq!(app.prompt_order.iter().copied().collect::<Vec<_>>(), [PromptKind::Open, PromptKind::Memory, PromptKind::Open]);
+    answer_historical(&mut app, &fields, false).unwrap();
+    assert!(app.ui.dialogs.iter().any(|dialog| owns_memory(&dialog.fields)));
+    assert_eq!(app.held_opens.front().unwrap().name(), "B.pcraft");
+    assert_eq!(app.session.active().unwrap().doc.name, "Existing");
+    // A stale preflight exercises the ordinary error handoff; it must release only
+    // its memory token and allow B to advance rather than leaving a dead prompt.
+    app.ui.dialogs.retain(|dialog| !owns_memory(&dialog.fields));
+    assert!(answer_memory(&mut app, false).is_err());
+    assert_eq!(app.session.active().unwrap().doc.name, "B.pcraft");
+    assert!(app.held_opens.is_empty());
+    assert!(app.held_memory_prompts.is_empty());
+    assert!(app.prompt_order.is_empty());
 }

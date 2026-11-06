@@ -202,10 +202,27 @@ pub fn apply_filter_to_surface(
     selection: Option<&photocraft_raster::Surface>,
     canvas: photocraft_geom::Rect,
 ) -> Result<Option<photocraft_raster::Surface>> {
-    apply_filter_to_surface_in(id, params, surf, bounds, selection, canvas, &photocraft_raster::Interrupt::NONE)
+    apply_filter_to_surface_in(id, params, surf, bounds, selection, canvas, &crate::jobs::JobCtx::new())
 }
-/// Native Smart Filter replay with cooperative cancellation; ordinary callers retain the API above.
+
+/// Render a stored filter with the caller's cancellation context, including custom kernel preparation.
 pub(crate) fn apply_filter_to_surface_in(
+    id: &str,
+    params: &Value,
+    surf: &photocraft_raster::Surface,
+    bounds: photocraft_geom::Rect,
+    selection: Option<&photocraft_raster::Surface>,
+    canvas: photocraft_geom::Rect,
+    ctx: &crate::jobs::JobCtx,
+) -> Result<Option<photocraft_raster::Surface>> {
+    ctx.check()?;
+    let cancelled = || ctx.cancelled();
+    let ctl = photocraft_raster::Interrupt::cancel_only(&cancelled);
+    replay_with_interrupt(id, params, surf, bounds, selection, canvas, &ctl)
+}
+
+/// The shared replay kernel also admits deterministic cancellation probes in regression tests.
+fn replay_with_interrupt(
     id: &str,
     params: &Value,
     surf: &photocraft_raster::Surface,
@@ -250,8 +267,12 @@ pub(crate) fn apply_filter_to_surface_in(
     let Some(mut fp) = params_for(id, params) else { return Ok(None) };
     // A map that can no longer be read (moved or deleted since) leaves the pixels alone, like an
     // unknown filter; the command itself already refused an unreadable map when it was added.
-    if crate::filters_ext::resolve_map_path(&mut fp, params).is_err() {
-        return Ok(None);
+    // The stack owns progress across filters; this operation only inherits cancellation.
+    match crate::filters_ext::resolve_map_path(&mut fp, params, ctl) {
+        Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+        Err(e) if matches!(fp, FilterParams::CustomShapeBlur { .. }) => return Err(e),
+        Err(_) => return Ok(None),
+        Ok(()) => {}
     }
     let sel_bounds = selection.map(photocraft_raster::Surface::content_bounds);
     let content = surf.content_bounds();
@@ -274,9 +295,32 @@ pub(crate) fn apply_filter_to_surface_in(
     if let Some(operation) = crate::coverage_cmds::operation(&fp) {
         return algo::coverage::apply_with(surf, operation, area, canvas.union(&content), selection, ctl).map(Some).map_err(crate::coverage_cmds::error);
     }
-    algo::apply_in_with(surf, &fp, area, bounds, selection, canvas.union(&content), ctl).map(Some).ok_or_else(|| {
-        if ctl.cancelled() { EngineError::Cancelled } else { EngineError::Other("native filter could not prepare bounded geometry or workspace".into()) }
-    })
+    let out = algo::apply_in_with(surf, &fp, area, bounds, selection, canvas.union(&content), ctl);
+    filter_output(out, ctl.cancelled()).map(Some)
+}
+
+#[cfg(test)]
+pub(crate) fn replay_with_cancellation_probe(
+    id: &str,
+    params: &Value,
+    surf: &photocraft_raster::Surface,
+    bounds: photocraft_geom::Rect,
+    selection: Option<&photocraft_raster::Surface>,
+    canvas: photocraft_geom::Rect,
+    ctl: &photocraft_raster::Interrupt<'_>,
+) -> Result<Option<photocraft_raster::Surface>> {
+    replay_with_interrupt(id, params, surf, bounds, selection, canvas, ctl)
+}
+
+/// A filter's result. The filter also yields nothing when it cannot prepare its working data (a
+/// custom Shape Blur kernel it cannot allocate or does not accept): that is a failure to report,
+/// not a cancellation, unless the job was cancelled.
+fn filter_output(out: Option<photocraft_raster::Surface>, cancelled: bool) -> Result<photocraft_raster::Surface> {
+    match out {
+        Some(surface) => Ok(surface),
+        None if cancelled => Err(EngineError::Cancelled),
+        None => Err(EngineError::Other("the filter could not prepare its working data (not enough memory, or an unusable kernel)".into())),
+    }
 }
 
 pub(crate) fn has_filterable_layer(s: &Session) -> std::result::Result<(), String> {
@@ -312,6 +356,7 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
     if id == "filter.distort.displace" {
         prepared = crate::filters_ext::displace_request(&prepared);
     }
+    crate::filters_ext::resolve_shape_path(s, id, &mut prepared)?;
     let p = &prepared;
     let mut fp = params_for(id, p).ok_or_else(|| EngineError::Other(format!("unknown filter {id}")))?;
     crate::filters_ext::resolve(s, &mut fp, p)?;
@@ -332,36 +377,39 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
         s,
         &label,
         move |doc, _, ctx| {
+            ctx.check()?;
+            let prepare_kernel = |fp: &mut FilterParams| ctx.stage(0.0, 0.1, "Preparing filter", |ctl| crate::filters_ext::resolve_shape_kernel(fp, &p, ctl));
             let filter = |surf: &photocraft_raster::Surface, fp: &FilterParams, area, bounds, sel: Option<&photocraft_raster::Surface>, extent| {
                 let _working = photocraft_raster::memory::try_reserve_operation(algo::working_bytes(fp, area, bounds, surf.format().channels()))
                     .map_err(EngineError::Other)?;
                 if let FilterParams::Convolution(options) = fp {
                     return ctx
-                        .stage(0.0, 1.0, &msg, |ctl| algo::convolution::apply_with(surf, options, area, extent, sel, ctl))
+                        .stage(0.1, 1.0, &msg, |ctl| algo::convolution::apply_with(surf, options, area, extent, sel, ctl))
                         .map_err(crate::coverage_cmds::error);
                 }
                 if matches!(fp, FilterParams::Average) {
-                    return ctx.stage(0.0, 1.0, &msg, |ctl| algo::average::apply_with(surf, area, bounds, sel, ctl)).map_err(crate::coverage_cmds::error);
+                    return ctx.stage(0.1, 1.0, &msg, |ctl| algo::average::apply_with(surf, area, bounds, sel, ctl)).map_err(crate::coverage_cmds::error);
                 }
                 if let FilterParams::ChannelNoise(options) = fp {
                     return ctx
-                        .stage(0.0, 1.0, &msg, |ctl| algo::channel_noise::apply_with(surf, options, area, extent, sel, ctl))
+                        .stage(0.1, 1.0, &msg, |ctl| algo::channel_noise::apply_with(surf, options, area, extent, sel, ctl))
                         .map_err(crate::coverage_cmds::error);
                 }
                 if let FilterParams::Percentile(options) = fp {
-                    return ctx.stage(0.0, 1.0, &msg, |ctl| algo::rank::apply_with(surf, options, area, extent, sel, ctl)).map_err(crate::coverage_cmds::error);
+                    return ctx.stage(0.1, 1.0, &msg, |ctl| algo::rank::apply_with(surf, options, area, extent, sel, ctl)).map_err(crate::coverage_cmds::error);
                 }
                 if let FilterParams::HdrToning(options) = fp {
                     return ctx
-                        .stage(0.0, 1.0, &msg, |ctl| algo::tone::checked_hdr::apply_with(surf, options, area, bounds, sel, ctl))
+                        .stage(0.1, 1.0, &msg, |ctl| algo::tone::checked_hdr::apply_with(surf, options, area, bounds, sel, ctl))
                         .map_err(crate::hdr_filter::error);
                 }
                 if let Some(operation) = crate::coverage_cmds::operation(fp) {
                     return ctx
-                        .stage(0.0, 1.0, &msg, |ctl| algo::coverage::apply_with(surf, operation, area, extent, sel, ctl))
+                        .stage(0.1, 1.0, &msg, |ctl| algo::coverage::apply_with(surf, operation, area, extent, sel, ctl))
                         .map_err(crate::coverage_cmds::error);
                 }
-                ctx.stage(0.0, 1.0, &msg, |ctl| algo::apply_in_with(surf, fp, area, bounds, sel, extent, ctl)).ok_or(EngineError::Cancelled)
+                let out = ctx.stage(0.1, 1.0, &msg, |ctl| algo::apply_in_with(surf, fp, area, bounds, sel, extent, ctl));
+                filter_output(out, ctx.cancelled())
             };
             let selection = doc.selection.clone();
             let sel_bounds = selection.as_ref().map(photocraft_raster::Surface::content_bounds);
@@ -372,6 +420,7 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
             // Neighbourhood filters repeat edge pixels at the canvas edge (or past it, where the
             // layer has off-canvas pixels) instead of fading in transparency, as Photoshop does.
             if let Some(surf) = crate::channel_cmds::channel_surface_for_filter(doc, Some(layer), &p)? {
+                prepare_kernel(&mut fp)?;
                 let content = doc_bounds.union(&surf.content_bounds());
                 let area = algo::output_area(&fp, content, bounds, sel_bounds);
                 *surf = filter(surf, &fp, area, bounds, selection.as_ref(), algo::separable::edge_extent(doc_bounds, content))?;
@@ -424,6 +473,7 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
                 }
                 _ => return Err(EngineError::Other("not a pixel layer".into())),
             };
+            prepare_kernel(&mut fp)?;
             if let Some(colors) = colors {
                 if changes_alpha {
                     return Err(EngineError::Other("this filter requires composite channels".into()));

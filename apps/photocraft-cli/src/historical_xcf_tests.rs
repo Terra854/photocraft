@@ -250,6 +250,29 @@ fn batch_imports_historical_xcf_and_wrappers_instead_of_silently_skipping_them()
     assert!(stdout.contains("4 succeeded, 0 failed"), "{stdout}");
     assert_eq!(stdout.matches("ok    ").count(), 4, "{stdout}");
     assert_eq!(std::fs::read_dir(&output).unwrap().count(), 4);
+    // Upstream naming/serial and approval options compose with explicit historical order.
+    // Without --format, every XCF transport still names and writes editable native output.
+    let named = dir.join("named");
+    let mut named_args = args(&named);
+    named_args.truncate(named_args.len() - 2);
+    named_args.extend([
+        "--historical-xcf-sample-order".into(),
+        "little-endian".into(),
+        "--approve-high-memory".into(),
+        "--naming".into(),
+        "{name}-{serial:2}.{ext}".into(),
+        "--start-serial".into(),
+        "5".into(),
+    ]);
+    let (code, stdout, stderr) = run_args(&named_args);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    for name in ["bzip-05.pcraft", "gzip-06.pcraft", "plain-07.pcraft", "xz-08.pcraft"] {
+        let doc = photocraft_format::load_path(&named.join(name)).unwrap();
+        let pixels = doc.layers[0].surface().unwrap().read_region(doc.bounds());
+        for (actual, expected) in pixels.iter().zip([0x1234u16, 0x3456, 0x789a, 0x4000]) {
+            assert_eq!((*actual * 65535.).round() as u16, expected, "{name}: naming must not change native samples");
+        }
+    }
     for ((name, original), output_name) in inputs.into_iter().zip(["plain.pcraft", "gzip.pcraft", "bzip.pcraft", "xz.pcraft"]) {
         let source_path = input_dir.join(name);
         let doc = photocraft_format::load_path(&output.join(output_name)).unwrap();

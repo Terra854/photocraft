@@ -227,17 +227,15 @@ mod tests {
     fn replay_refuses_bad_controls_and_cancellation() {
         use photocraft_color::{ColorMode, PixelFormat, SampleType};
         use photocraft_geom::Rect;
-        use photocraft_raster::{Interrupt, Surface};
+        use photocraft_raster::Surface;
         let bounds = Rect::new(-2, 3, 2, 6);
         let mut source = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::F32, true));
         source.fill_rect(bounds, &[2., 0.4, 0.1, 0.7]);
         let before = source.clone();
         assert!(crate::filters::apply_filter_to_surface(ID, &json!({"radius":-1}), &source, bounds, None, bounds).is_err());
-        let cancelled = || true;
-        assert!(matches!(
-            crate::filters::apply_filter_to_surface_in(ID, &json!({}), &source, bounds, None, bounds, &Interrupt::cancel_only(&cancelled)),
-            Err(EngineError::Cancelled)
-        ));
+        let ctx = crate::jobs::JobCtx::new();
+        ctx.cancel();
+        assert!(matches!(crate::filters::apply_filter_to_surface_in(ID, &json!({}), &source, bounds, None, bounds, &ctx), Err(EngineError::Cancelled)));
         assert_eq!(source, before);
     }
 }

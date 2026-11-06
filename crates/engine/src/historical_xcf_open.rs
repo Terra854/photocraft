@@ -27,6 +27,7 @@ struct Request {
 enum Read {
     Decoded(Box<photocraft_io::ImportResult>, Decision, JobCtx),
     Choice(Arc<Vec<u8>>, photocraft_io::HistoricalXcfSampleOrderRequest, JobCtx),
+    Preflight(super::PendingPsdPreflight, JobCtx),
 }
 
 enum Decision {
@@ -40,6 +41,7 @@ struct WorkerPolicy {
     ignore_exif: bool,
     exr_aces_cg: bool,
     raw_resolution: f64,
+    refuse_preview: bool,
     authorize: Option<fn(&str, &Value) -> Result<()>>,
 }
 
@@ -50,7 +52,8 @@ impl WorkerPolicy {
             color: s.color.settings.clone(),
             ignore_exif: s.prefs().file_handling.ignore_exif_profile_tag,
             exr_aces_cg: s.prefs().file_handling.exr_aces_cg,
-            raw_resolution: s.prefs().raw_defaults.resolution,
+            raw_resolution: crate::file_cmds::raw_open_resolution(s),
+            refuse_preview: s.batch_open.is_some() || s.batch_open_notices.is_some(),
             authorize: s.authorize,
         }
     }
@@ -58,6 +61,9 @@ impl WorkerPolicy {
     /// Finish color policy and native caches on the execution thread, or retain an unprepared color/damage hold.
     fn prepare(self, name: &str, mut imported: photocraft_io::ImportResult, damaged: bool, interactive: bool, ctx: &JobCtx) -> Result<Read> {
         ctx.check()?;
+        if self.refuse_preview && imported.preview_only {
+            return Err(EngineError::Other(format!("{name}: only an embedded preview could be read; Batch cannot process it as the source")));
+        }
         crate::file_cmds::tag_exr_colorspace_with_policy(self.exr_aces_cg, name, &mut imported.document);
         crate::file_cmds::raw_resolution(self.raw_resolution, &imported.warnings, &mut imported.document);
         if let Some(view) = &imported.initial_view {
@@ -145,12 +151,29 @@ fn install_prepared(
 }
 
 /// Start an open request with its source path identity and optional interactive historical sample-order handoff.
-pub(super) fn start(s: &mut Session, name: &str, source: OpenSource, interactive: bool) -> Result<Started> {
+#[allow(clippy::too_many_arguments)]
+pub(super) fn start(
+    s: &mut Session,
+    name: &str,
+    source: OpenSource,
+    interactive: bool,
+    approve_high_memory: bool,
+    approved_estimate: Option<u64>,
+    expected_fingerprint: Option<super::SourceFingerprint>,
+    background: bool,
+) -> Result<Started> {
     let path = match &source {
         OpenSource::Path(path) => Some(path.clone()),
         OpenSource::Bytes(_) => None,
     };
-    run(s, Request { name: name.into(), source, path, interactive, order: None, held: None }, true)
+    run_with_approval(
+        s,
+        Request { name: name.into(), source, path, interactive, order: None, held: None },
+        background,
+        approve_high_memory,
+        approved_estimate,
+        expected_fingerprint,
+    )
 }
 
 /// Open on the selected execution path while allowing an explicit user choice for ambiguous historical sample bytes.
@@ -201,7 +224,12 @@ pub(crate) fn command(s: &mut Session, params: &Value) -> Result<Value> {
             .to_string();
         Request { name: path.clone(), source: OpenSource::Path(path.clone()), path: Some(path), interactive, order, held: None }
     };
-    let started = run(s, request, false);
+    let approve_high_memory = match params.get("approveHighMemory") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(EngineError::Other("file.open: approveHighMemory must be boolean".into())),
+    };
+    let started = run_with_approval(s, request, false, approve_high_memory, None, None);
     // Successful installation consumes the held identity in `run`'s apply step.
     // Failed authorization, decoding or cancellation keeps the capability retryable.
     match started? {
@@ -230,43 +258,141 @@ impl Session {
 /// Decode before installation or hold bounded encoded bytes for a required choice; cancellation and failure publish no
 /// partial document.
 fn run(s: &mut Session, request: Request, background: bool) -> Result<Started> {
+    run_with_approval(s, request, background, false, None, None)
+}
+
+fn run_with_approval(
+    s: &mut Session,
+    request: Request,
+    background: bool,
+    approve_high_memory: bool,
+    approved_estimate: Option<u64>,
+    expected_fingerprint: Option<super::SourceFingerprint>,
+) -> Result<Started> {
     let Request { name, source, path, interactive, order, held } = request;
     let label = format!("Opening {name}");
+    let job_params = json!({"name":name});
     let name_w = name.clone();
     let mut options = super::import_options(s.prefs());
     options.historical_xcf_sample_order = order;
+    options.psd_high_memory_approved = approve_high_memory;
+    options.psd_approved_estimate = approved_estimate;
+    let test_memory_scope = photocraft_io::memory::TestMemoryScope::capture();
     let policy = WorkerPolicy::capture(s);
     let work = move |ctx: &JobCtx| {
+        let _test_memory = test_memory_scope.enter();
         ctx.progress(0., "Reading");
-        let acquired = match source {
-            OpenSource::Bytes(bytes) => super::AcquiredOpenSource::Bytes(bytes),
-            OpenSource::Path(path) => ctx.stage(0.0, 0.02, "Reading", |ctl| super::acquire_open_path(&name_w, &path, ctl)).map_err(|error| match error {
-                photocraft_io::IoError::Cancelled => EngineError::Cancelled,
-                error => EngineError::Other(error.to_string()),
-            })?,
+        let initial_fingerprint = match &source {
+            OpenSource::Bytes(_) => Some(super::SourceFingerprint::of(&source)?),
+            OpenSource::Path(_) => None,
+        };
+        if let Some(expected) = &expected_fingerprint
+            && let Some(current) = &initial_fingerprint
+            && !expected.matches(current)
+        {
+            return Err(EngineError::SourceChanged { name: name_w.clone() });
+        }
+        let pause = |required, soft_limit, hard_limit, available_ram, source, fingerprint| {
+            Read::Preflight(
+                super::PendingPsdPreflight {
+                    id: 0,
+                    name: name_w.clone(),
+                    source,
+                    fingerprint,
+                    required,
+                    soft_limit,
+                    hard_limit,
+                    available_ram,
+                    confirm_damage: interactive,
+                },
+                ctx.clone(),
+            )
         };
         ctx.check()?;
-        ctx.progress(0.02, "Decoding");
-        let imported = match acquired {
-            super::AcquiredOpenSource::Bytes(bytes) => {
-                match ctx.stage(0.02, 0.95, "Decoding", |ctl| photocraft_io::import_for_open_with(&name_w, &bytes, &options, ctl)) {
+        let imported = match source {
+            OpenSource::Bytes(bytes) => {
+                let result = ctx.stage(0.02, 0.95, "Decoding", |ctl| photocraft_io::import_for_open_with(&name_w, &bytes, &options, ctl));
+                match result {
                     Err(photocraft_io::IoError::HistoricalXcfSampleOrderRequired(question)) if interactive => {
                         ctx.check()?;
                         return Ok(Read::Choice(bytes, question, ctx.clone()));
                     }
+                    Err(photocraft_io::IoError::PsdApprovalRequired { required, soft_limit, hard_limit, available_ram }) if interactive => {
+                        let fingerprint = initial_fingerprint.ok_or_else(|| EngineError::Other("missing source identity".into()))?;
+                        return Ok(pause(required, soft_limit, hard_limit, available_ram, OpenSource::Bytes(bytes), fingerprint));
+                    }
                     result => result,
                 }
             }
-            #[cfg(any(unix, windows))]
-            super::AcquiredOpenSource::Psd(source) => ctx.stage(0.02, 0.95, "Decoding", |ctl| photocraft_io::import_source_for_open_with(&name_w, source, ctl)),
+            OpenSource::Path(path) => {
+                let mut opened = None;
+                let result =
+                    ctx.stage(0.0, 0.95, "Decoding", |ctl| super::import_path(&name_w, &path, &options, expected_fingerprint.as_ref(), ctl, &mut opened));
+                match result {
+                    Err(photocraft_io::IoError::HistoricalXcfSampleOrderRequired(_)) if interactive => {
+                        // Retain the exact bounded snapshot used for the choice. Check the
+                        // original decoded handle's identity before reading a replacement handle.
+                        let acquired = ctx.stage(0.0, 0.02, "Reading", |ctl| super::acquire_open_path(&name_w, &path, ctl, opened.as_ref())).map_err(
+                            |error| match error {
+                                photocraft_io::IoError::Cancelled => EngineError::Cancelled,
+                                error => crate::error::io_open_error(&name_w, error),
+                            },
+                        )?;
+                        let bytes = match acquired {
+                            super::AcquiredOpenSource::Bytes(bytes) => bytes,
+                            #[cfg(any(unix, windows))]
+                            super::AcquiredOpenSource::Psd(source) => {
+                                drop(source);
+                                return Err(EngineError::SourceChanged { name: name_w.clone() });
+                            }
+                        };
+                        match ctx.stage(0.02, 0.95, "Decoding", |ctl| photocraft_io::import_for_open_with(&name_w, &bytes, &options, ctl)) {
+                            Err(photocraft_io::IoError::HistoricalXcfSampleOrderRequired(question)) => {
+                                ctx.check()?;
+                                return Ok(Read::Choice(bytes, question, ctx.clone()));
+                            }
+                            result => result,
+                        }
+                    }
+                    Err(photocraft_io::IoError::PsdApprovalRequired { required, soft_limit, hard_limit, available_ram }) if interactive => {
+                        let identity = opened.ok_or_else(|| EngineError::Other(format!("{path}: the file's identity could not be read")))?;
+                        let fingerprint = super::SourceFingerprint::path(path.clone(), identity);
+                        return Ok(pause(required, soft_limit, hard_limit, available_ram, OpenSource::Path(path), fingerprint));
+                    }
+                    result => result,
+                }
+            }
         }
         .map_err(|error| match error {
             photocraft_io::IoError::Cancelled => EngineError::Cancelled,
-            error => EngineError::Other(error.to_string()),
+            photocraft_io::IoError::PsdApprovalRequired { required, soft_limit, hard_limit, available_ram } => {
+                EngineError::PsdApprovalRequired { name: name_w.clone(), required, soft_limit, hard_limit, available_ram }
+            }
+            error => crate::error::io_open_error(&name_w, error),
         })?;
         policy.prepare(&name_w, imported.0, imported.1, interactive, ctx)
     };
     let apply = move |s: &mut Session, result: Read| {
+        let result = match result {
+            Read::Preflight(pending, ctx) => {
+                ctx.check()?;
+                let (required, soft_limit, hard_limit, available_ram) = (pending.required, pending.soft_limit, pending.hard_limit, pending.available_ram);
+                let capacity_unknown = available_ram.is_none();
+                let uncertain_capacity = photocraft_io::memory::uncertain_capacity_warning(required, available_ram);
+                let id = s.store_pending_preflight(pending)?;
+                return Ok(json!({
+                    "pendingPreflight": id,
+                    "name": name,
+                    "estimated": required,
+                    "softLimit": soft_limit,
+                    "hardLimit": hard_limit,
+                    "availableRam": available_ram,
+                    "capacityUnknown": capacity_unknown,
+                    "uncertainCapacityWarning": uncertain_capacity,
+                }));
+            }
+            result => result,
+        };
         let Read::Decoded(imported, decision, ctx) = result else {
             let Read::Choice(bytes, question, ctx) = result else { return Err(EngineError::Other("invalid historical open result".into())) };
             ctx.check()?;
@@ -313,6 +439,8 @@ fn run(s: &mut Session, request: Request, background: bool) -> Result<Started> {
         } else {
             let Decision::Prepared { color } = decision else { return Err(EngineError::Other("invalid prepared open decision".into())) };
             let (index, id) = install_prepared(s, imported.document, path, imported.source_read_only, imported.initial_view, &ctx)?;
+            crate::file_cmds::batch_open_notice(s, &name, &imported.warnings, &color);
+            crate::file_cmds::remember_batch_open(s);
             let conversion = s.active().map(|state| crate::import_report_cmds::summary(state.doc.metadata.import_conversion.as_ref())).unwrap_or(Value::Null);
             json!({"document":index,"docId":id.0,"name":name,"warnings":imported.warnings,"color":color,"importConversion":conversion})
         };
@@ -321,16 +449,25 @@ fn run(s: &mut Session, request: Request, background: bool) -> Result<Started> {
         }
         Ok(value)
     };
-    if background {
-        s.start_job(OPEN_JOB, json!({"name":label}), &label, false, work, apply)
-    } else {
-        super::run(s, &label, false, work, apply).map(Started::Done)
-    }
+    s.start_job_with_spawn(OPEN_JOB, job_params, &label, false, background, work, apply)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approved_native_open_rejects_a_different_byte_snapshot_before_preparation() {
+        let bytes = native_source();
+        let expected = super::super::SourceFingerprint::of(&OpenSource::Bytes(Arc::new(bytes.as_ref().clone()))).unwrap();
+        let mut session = Session::new();
+        assert!(matches!(
+            start(&mut session, "native.pcraft", OpenSource::Bytes(bytes), false, true, None, Some(expected), false),
+            Err(EngineError::SourceChanged { .. })
+        ));
+        assert!(session.documents().is_empty());
+        assert!(session.pending_preflights.is_empty());
+    }
 
     /// Author an embedded native Smart Filter whose absent cache requires real preparation.
     fn native_source() -> Arc<Vec<u8>> {
@@ -606,13 +743,15 @@ mod tests {
         let bytes = photocraft_io::export(&seed.active().unwrap().doc, "source.psd", &Default::default()).unwrap().bytes;
         std::fs::write(&path, &bytes).unwrap();
         let path = path.to_str().unwrap();
-        let super::super::AcquiredOpenSource::Psd(source) = super::super::acquire_open_path("source.bin", path, &photocraft_raster::Interrupt::NONE).unwrap()
+        let super::super::AcquiredOpenSource::Psd(source) =
+            super::super::acquire_open_path("source.bin", path, &photocraft_raster::Interrupt::NONE, None).unwrap()
         else {
             panic!("PSD magic must select file-backed parsing")
         };
         assert_eq!(source.read_vec(0, 4).unwrap(), b"8BPS");
         for name in ["folder/source.PcRaFt", "folder\\source.pcraft"] {
-            let super::super::AcquiredOpenSource::Bytes(retained) = super::super::acquire_open_path(name, path, &photocraft_raster::Interrupt::NONE).unwrap()
+            let super::super::AcquiredOpenSource::Bytes(retained) =
+                super::super::acquire_open_path(name, path, &photocraft_raster::Interrupt::NONE, None).unwrap()
             else {
                 panic!("native extension must retain native decoder priority")
             };

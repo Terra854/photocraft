@@ -129,7 +129,7 @@ fn cache_put_within(key: CacheKey, image: SourceImage, authorization: Option<Pro
 }
 
 /// Successful source-image decodes since this cache entry was created (zero for seeded composites or evicted entries).
-/// Direct uncached [`decode_source`] calls are excluded; the diagnostic saturates at `u32::MAX`.
+/// Direct uncached [`super::decode_source`] calls are excluded; the diagnostic saturates at `u32::MAX`.
 pub fn source_decode_count(bytes: &[u8], fmt: PixelFormat) -> u32 {
     let key = cache_key(bytes, fmt);
     cache().iter().find(|e| e.key == key).map(|e| e.decodes).unwrap_or(0)
@@ -434,6 +434,7 @@ pub(super) fn source_image_in(file_name: &str, bytes: &[u8], fmt: PixelFormat, c
     if let Some(image) = cache_get_authorized(&key, ctx)? {
         return Ok(image);
     }
+    crate::memory_gate::ensure(&format!("render the smart object \u{201c}{file_name}\u{201d}"), crate::memory_gate::smart_render_need(bytes))?;
     let recording = render_proof::start()?;
     let doc = decode_source_admitted_in(file_name, bytes, ctx)?;
     let img = prepared_source_image(&doc, fmt, None, ctx)?;

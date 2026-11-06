@@ -554,7 +554,7 @@ mod tests {
     fn checked_smart_replay_preserves_errors_cancellation_and_native_filters() {
         use photocraft_color::{ColorMode, PixelFormat, SampleType};
         use photocraft_geom::Rect;
-        use photocraft_raster::{Interrupt, Surface};
+        use photocraft_raster::Surface;
         let r = Rect::new(0, 0, 3, 3);
         let mut surf = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::F32, true));
         surf.fill_rect(r, &[0.2, 0.4, 2., 1.]);
@@ -563,9 +563,10 @@ mod tests {
         for params in [json!({"channel":"alpha","extra":1}), json!({"connectivity":7}), json!({"channel":null})] {
             assert!(crate::filters::apply_filter_to_surface(FILL_HOLES, &params, &surf, r, None, r).is_err());
         }
-        let cancel = || true;
+        let ctx = crate::jobs::JobCtx::new();
+        ctx.cancel();
         assert!(matches!(
-            crate::filters::apply_filter_to_surface_in(FILL_HOLES, &json!({"channel":"alpha"}), &surf, r, None, r, &Interrupt::cancel_only(&cancel)),
+            crate::filters::apply_filter_to_surface_in(FILL_HOLES, &json!({"channel":"alpha"}), &surf, r, None, r, &ctx),
             Err(EngineError::Cancelled)
         ));
         assert!(crate::filters::apply_filter_to_surface(FILL_HOLES, &json!({}), &surf, r, None, Rect::new(i32::MIN, 0, i32::MAX, 3)).is_err());
@@ -586,7 +587,7 @@ mod tests {
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let cancel = || calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 3;
         assert!(matches!(
-            crate::filters::apply_filter_to_surface_in("filter.blur.boxBlur", &json!({"radius":8}), &source, r, None, r, &Interrupt::cancel_only(&cancel)),
+            crate::filters::replay_with_cancellation_probe("filter.blur.boxBlur", &json!({"radius":8}), &source, r, None, r, &Interrupt::cancel_only(&cancel)),
             Err(EngineError::Cancelled)
         ));
         assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 3);

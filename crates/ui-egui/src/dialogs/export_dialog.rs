@@ -220,6 +220,7 @@ pub fn quick_export_selected_layers_png(app: &mut PhotocraftApp) -> Result<Value
         }
         let mut exported = Vec::new();
         for (doc, path) in docs.iter().zip(paths) {
+            crate::app::ensure_memory_to_save(doc, &path)?;
             let export = app.services.export.as_ref().ok_or("no exporter configured")?;
             let (bytes, warnings) = export(doc, &path, &ExportSettings { xmp_all: false, ..Default::default() })?;
             let write = app.services.write.as_mut().ok_or("no writer configured")?;
@@ -1084,6 +1085,7 @@ fn write_export(
 ) -> Result<Value, String> {
     check_export_destination(protected_source, path)?;
     let out = export_document(doc, f, None, source_profile)?;
+    crate::app::ensure_memory_to_save(&out, path)?;
     let export = app.services.export.as_ref().ok_or("no exporter configured")?;
     let (bytes, warnings) = export(&out, path, &settings(f))?;
     let write = app.services.write.as_mut().ok_or("no writer configured")?;
@@ -1142,6 +1144,7 @@ fn confirm_layers(app: &mut PhotocraftApp, f: &Map<String, Value>, ids: &[photoc
         let mut exported = Vec::new();
         for (doc, path) in docs.iter().zip(paths) {
             let out = export_document(doc, &f, None, &source_profile)?;
+            crate::app::ensure_memory_to_save(&out, &path)?;
             let export = app.services.export.as_ref().ok_or("no exporter configured")?;
             let (bytes, warnings) = export(&out, &path, &settings)?;
             let write = app.services.write.as_mut().ok_or("no writer configured")?;

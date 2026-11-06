@@ -5,7 +5,7 @@ use super::source::{
 };
 use super::{
     Affine, Arc, BlendMode, Document, EngineError, Homography, JobCtx, Layer, LayerContent, LayerId, PixelFormat, Rect, Result, SmartFilter, SmartObject,
-    SmartSource, Stage, StageKey, Surface, Value, other, stack_cache,
+    SmartSource, Stage, StageKey, Surface, Value, affine_homography, other, placement, stack_cache,
 };
 use std::sync::Mutex;
 
@@ -37,7 +37,7 @@ pub fn apply_smart_filters(placed: &Surface, sm: &SmartObject, canvas: Rect) -> 
     // Edge pixels repeat at the canvas ∪ placed-content edge, as for layer filters.
     let extent = canvas.union(&placed.content_bounds());
     for f in sm.smart_filters.iter().filter(|f| f.visible) {
-        cur = apply_smart_filter(f, &cur, filter_bounds(f, placed, canvas), extent)?;
+        cur = apply_smart_filter(f, &cur, filter_bounds(f, placed, canvas), extent, &JobCtx::new())?;
     }
     Ok(match sm.filter_mask.as_ref().filter(|m| m.enabled) {
         Some(m) => photocraft_compose::filter_mask::mix(placed, &cur, m),
@@ -63,8 +63,8 @@ fn renders_in_object(f: &SmartFilter) -> bool {
 /// One visible smart filter over `cur`, blended with its blend mode and opacity. `Err` when the
 /// requesting session's authority denies the filter's params: callers surface the error instead of
 /// rendering (and caching) unfiltered pixels.
-fn apply_smart_filter(f: &SmartFilter, cur: &Surface, canvas: Rect, extent: Rect) -> Result<Surface> {
-    apply_smart_filter_in(f, cur, canvas, extent, &photocraft_raster::Interrupt::NONE)
+fn apply_smart_filter(f: &SmartFilter, cur: &Surface, canvas: Rect, extent: Rect, ctx: &JobCtx) -> Result<Surface> {
+    apply_smart_filter_in(f, cur, canvas, extent, ctx)
 }
 
 /// The source placed in document pixels, before any smart filter.
@@ -79,11 +79,13 @@ pub(super) fn place(name: &str, bytes: &[u8], doc: &Document, sm: &SmartObject, 
             Some(p) => {
                 let [h0, h1, h2, h3, h4, h5, h6, h7, h8] = *p;
                 let h = Homography([h0 / k, h1 / k, h2, h3 / k, h4 / k, h5, h6 / k, h7 / k, h8]);
+                crate::transform_cmds::check_budget(img.bounds, &h, "smart object", fmt)?;
                 photocraft_algo::warp::place_source_projective(&img.surface, img.bounds, &h, None)?
             }
             None => {
                 let [a, b, c, d, e, f] = sm.transform.m;
                 let t = Affine { m: [a / k, b / k, c / k, d / k, e, f] };
+                crate::transform_cmds::check_budget(img.bounds, &affine_homography(&t), "smart object", fmt)?;
                 photocraft_algo::warp::place_source(&img.surface, img.bounds, &t, None)?
             }
         });
@@ -97,9 +99,13 @@ pub(super) fn place(name: &str, bytes: &[u8], doc: &Document, sm: &SmartObject, 
             None => source_image_in(name, bytes, fmt, ctx)?,
         },
     };
+    // The placed stage is unclipped: a large enough placement (an image scaled to fill a huge
+    // frame) would otherwise fill memory before any allocation could fail.
+    let h = placement(sm);
+    crate::transform_cmds::check_budget(img.bounds, &h, "smart object", fmt)?;
     // Through the warp (source space) and the transform in one pass; whole-pixel moves are exact.
     Ok(match &sm.perspective {
-        Some(p) => photocraft_algo::warp::place_source_projective(&img.surface, img.bounds, &Homography(*p), sm.warp.as_ref())?,
+        Some(_) => photocraft_algo::warp::place_source_projective(&img.surface, img.bounds, &h, sm.warp.as_ref())?,
         None => photocraft_algo::warp::place_source(&img.surface, img.bounds, &sm.transform, sm.warp.as_ref())?,
     })
 }
@@ -369,13 +375,17 @@ pub(crate) fn prepared_source_image(doc: &Document, fmt: PixelFormat, mode: Opti
 
 /// Replay an ordinary native filter with interruption, preserving unknown-filter fallback and native blend/opacity
 /// mixing.
-fn apply_smart_filter_in(f: &SmartFilter, cur: &Surface, canvas: Rect, extent: Rect, ctl: &photocraft_raster::Interrupt) -> Result<Surface> {
-    let out = match crate::filters::apply_filter_to_surface_in(&f.command, &f.params, cur, canvas, None, extent, ctl)? {
+fn apply_smart_filter_in(f: &SmartFilter, cur: &Surface, canvas: Rect, extent: Rect, ctx: &JobCtx) -> Result<Surface> {
+    ctx.check()?;
+    let out = match crate::filters::apply_filter_to_surface_in(&f.command, &f.params, cur, canvas, None, extent, ctx)? {
         // Unknown ids (e.g. Photoshop filters we don't implement) leave the pixels alone.
         Some(out) => out,
         None => cur.clone(),
     };
-    if f.blend == BlendMode::Normal && f.opacity >= 1.0 { Ok(out) } else { blend_surfaces(cur, &out, f.blend, f.opacity.clamp(0.0, 1.0), ctl) }
+    ctx.check()?;
+    let cancelled = || ctx.cancelled();
+    let ctl = photocraft_raster::Interrupt::cancel_only(&cancelled);
+    if f.blend == BlendMode::Normal && f.opacity >= 1.0 { Ok(out) } else { blend_surfaces(cur, &out, f.blend, f.opacity.clamp(0.0, 1.0), &ctl) }
 }
 
 /// Replay against a caller-prepared source using the same cancellation and authorization scope.
@@ -447,10 +457,7 @@ fn render_with_source_in(doc: &Document, sm: &SmartObject, ctx: &JobCtx, prepare
             Some(b) => b,
             None => *object_bounds.insert(filter_bounds(f, &placed()?.surface, canvas)),
         };
-        cur = Stage {
-            surface: ctx.stage(i as f32 / n, (i + 1) as f32 / n, "", |ctl| apply_smart_filter_in(f, &cur.surface, bounds, cur.extent, ctl))?,
-            extent: cur.extent,
-        };
+        cur = Stage { surface: apply_smart_filter_in(f, &cur.surface, bounds, cur.extent, ctx)?, extent: cur.extent };
         stack_cache::put(*key, &cur);
     }
     ctx.progress(1.0, "");

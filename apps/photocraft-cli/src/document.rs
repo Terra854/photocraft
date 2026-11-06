@@ -10,7 +10,7 @@ use photocraft_io::ExportOptions;
 use crate::{
     CliError, Result,
     args::{ConvertArgs, InfoArgs, RunArgs, Step},
-    output::{JsonStyle, print_json, warn_all},
+    output::{JsonStyle, print_json, warn_all, warn_dedup},
 };
 
 /// An output that is the input file itself, however it is spelt (relative, with `./`, through a
@@ -32,7 +32,12 @@ pub(crate) fn convert(a: &ConvertArgs, _out: &mut dyn Write, err: &mut dyn Write
     let (input, output) = (&a.input, &a.output);
     let opts = ExportOptions::from(&a.export);
     refuse_overwriting_input(a.in_place, input, output)?;
-    let mut o = files::open_with_sample_order(input, a.import.historical_xcf_sample_order)?;
+    let import_opts = photocraft_io::ImportOptions {
+        psd_high_memory_approved: a.approve_high_memory,
+        historical_xcf_sample_order: a.import.historical_xcf_sample_order,
+        ..Default::default()
+    };
+    let mut o = files::open_with_options(input, &import_opts)?;
     if o.source_read_only && photocraft_engine::file_cmds::same_file(input, output) {
         return Err(CliError::ImportOnlySource);
     }
@@ -40,10 +45,22 @@ pub(crate) fn convert(a: &ConvertArgs, _out: &mut dyn Write, err: &mut dyn Write
     let session = photocraft_engine::Session::new();
     photocraft_engine::file_cmds::raw_defaults(&session, &o.warnings, &mut o.document);
     session.prepare_imported_document(&mut o.document, &photocraft_engine::jobs::JobCtx::new())?;
-    warn_all(err, &o.warnings);
-    warn_all(err, &missing_font_warnings(&o.document));
-    let ws = files::save(&o.document, output, a.export.format.as_deref(), &opts, None)?;
-    warn_all(err, &ws);
+    let mut seen_warnings = std::collections::HashSet::<String>::new();
+    warn_dedup(err, &o.warnings, &mut seen_warnings);
+    warn_dedup(err, &missing_font_warnings(&o.document), &mut seen_warnings);
+    let policy = crate::gpu::GpuPolicy::from_args(&a.gpu).map_err(CliError::Other)?;
+    let mut renderer = policy.create_renderer();
+    let ws = match renderer.as_mut() {
+        Some(renderer) => files::save_with_renderer(&o.document, output, a.export.format.as_deref(), &opts, None, Some(&mut **renderer)),
+        None => files::save(&o.document, output, a.export.format.as_deref(), &opts, None),
+    };
+    // A failed GPU export can leave fallback reasons queued: report them before the error
+    // propagates, or the user would never learn why the GPU was not used.
+    if let Some(renderer) = renderer.as_mut() {
+        warn_dedup(err, &renderer.drain_diagnostics(), &mut seen_warnings);
+    }
+    let ws = ws?;
+    warn_dedup(err, &ws, &mut seen_warnings);
     Ok(())
 }
 
@@ -52,8 +69,16 @@ pub(crate) fn convert(a: &ConvertArgs, _out: &mut dyn Write, err: &mut dyn Write
 pub(crate) fn info(a: &InfoArgs, out: &mut dyn Write) -> Result {
     let file = &a.file;
     let mut h = Headless::trusted_local();
-    let opened = h.open_with_sample_order(file, a.import.historical_xcf_sample_order)?;
-    let mut doc = h.inspect(None)?;
+    let import_opts = photocraft_io::ImportOptions {
+        psd_high_memory_approved: a.approve_high_memory,
+        historical_xcf_sample_order: a.import.historical_xcf_sample_order,
+        ..Default::default()
+    };
+    let opened = h.open_with_options(file, &import_opts)?;
+    let mut doc = match (a.detail, h.session.active()) {
+        (true, Some(st)) => photocraft_engine::inspect::document_detail(st),
+        _ => h.inspect(None)?,
+    };
     let mut warnings = opened["warnings"].as_array().cloned().unwrap_or_default();
     if let Some(st) = h.session.active() {
         warnings.extend(missing_font_warnings(&st.doc).into_iter().map(Value::String));
@@ -81,11 +106,16 @@ fn command_list(a: &RunArgs) -> Result<Vec<(String, Value)>> {
     Ok(cmds)
 }
 
+/// Reported once by `run --gpu` when a step is `file.export.quickExport`.
+const QUICK_EXPORT_CPU_NOTE: &str = "file.export.quickExport runs on the CPU compositor; --gpu applies to --out and the export commands that take a renderer";
+
 /// Open or create a native document, execute requested commands and export under source protection with
 /// deduplicated warnings.
 pub(crate) fn run_cmds(a: &RunArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result {
     let opts = ExportOptions::from(&a.export);
     let mut h = Headless::trusted_local();
+    let policy = crate::gpu::GpuPolicy::from_args(&a.gpu).map_err(CliError::Other)?;
+    policy.apply_to_headless(&mut h);
     // Opening, running commands and exporting can all notice the same missing font:
     // one `run` invocation reports each warning line at most once.
     let mut reported_fonts = std::collections::HashSet::<String>::new();
@@ -97,7 +127,12 @@ pub(crate) fn run_cmds(a: &RunArgs, out: &mut dyn Write, err: &mut dyn Write) ->
         if let Some(out) = &a.out {
             refuse_overwriting_input(a.in_place, file, out)?;
         }
-        let o = h.open_with_sample_order(file, a.import.historical_xcf_sample_order)?;
+        let import_opts = photocraft_io::ImportOptions {
+            psd_high_memory_approved: a.approve_high_memory,
+            historical_xcf_sample_order: a.import.historical_xcf_sample_order,
+            ..Default::default()
+        };
+        let o = h.open_with_options(file, &import_opts)?;
         let ws: Vec<String> = serde_json::from_value(o["warnings"].clone()).unwrap_or_default();
         warn_all(err, &ws);
         reported_fonts.extend(ws);
@@ -110,12 +145,25 @@ pub(crate) fn run_cmds(a: &RunArgs, out: &mut dyn Write, err: &mut dyn Write) ->
             continue;
         }
         let r = h.command_run(&id, params).map_err(|source| CliError::Command { id: id.clone(), source })?;
-        if let Some(message) = photocraft_engine::actions_cmds::nested_failure(&id, &r) {
+        // A direct Batch reports per-file errors and continues, as in Scripts, unless it was
+        // cancelled, ran out of script steps or couldn't write its error log; failed action or
+        // script calls still stop the command list before export.
+        let failure = if id == "file.automate.batch" {
+            photocraft_engine::actions_cmds::batch_stop(&r)
+        } else {
+            photocraft_engine::actions_cmds::nested_failure(&id, &r)
+        };
+        if let Some(message) = failure {
             return Err(CliError::NestedFailure { id, message });
         }
         let new_warnings: Vec<String> =
             h.session.active().map(|st| missing_font_warnings(&st.doc)).unwrap_or_default().into_iter().filter(|w| reported_fonts.insert(w.clone())).collect();
         warn_all(err, &new_warnings);
+        // Quick Export composites and encodes inside the engine, which has no renderer: say so
+        // once, so `--gpu` never looks as if it applied to it (docs/development.md, GPU).
+        if policy.enabled && id == "file.export.quickExport" {
+            warn_dedup(err, &[QUICK_EXPORT_CPU_NOTE.to_string()], &mut reported_fonts);
+        }
         let mut result = json!({"command": id, "result": r});
         if !new_warnings.is_empty() {
             result["warnings"] = json!(new_warnings);
@@ -127,11 +175,19 @@ pub(crate) fn run_cmds(a: &RunArgs, out: &mut dyn Write, err: &mut dyn Write) ->
         h.session.active().map(|st| missing_font_warnings(&st.doc)).unwrap_or_default().into_iter().filter(|w| reported_fonts.insert(w.clone())).collect();
     warn_all(err, &remaining);
     if let Some(o) = a.out.as_deref() {
-        let r = h.save(None, Some(o), a.export.format.as_deref(), &opts)?;
+        let saved = h.save(None, Some(o), a.export.format.as_deref(), &opts);
+        // Report GPU diagnostics even when the export fails: the fallback reason is queued
+        // during the failed export and would otherwise be lost on the error path.
+        let failed_diags: Vec<String> = h.drain_diagnostics().into_iter().filter(|w| reported_fonts.insert(w.clone())).collect();
+        warn_all(err, &failed_diags);
+        let r = saved?;
         let ws: Vec<String> = serde_json::from_value(r["warnings"].clone()).unwrap_or_default();
         let ws: Vec<String> = ws.into_iter().filter(|w| reported_fonts.insert(w.clone())).collect();
         warn_all(err, &ws);
     }
+    let diags = h.drain_diagnostics();
+    let diags: Vec<String> = diags.into_iter().filter(|w| reported_fonts.insert(w.clone())).collect();
+    warn_all(err, &diags);
     Ok(())
 }
 
