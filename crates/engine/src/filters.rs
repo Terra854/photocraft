@@ -295,8 +295,7 @@ fn replay_with_interrupt(
     if let Some(operation) = crate::coverage_cmds::operation(&fp) {
         return algo::coverage::apply_with(surf, operation, area, canvas.union(&content), selection, ctl).map(Some).map_err(crate::coverage_cmds::error);
     }
-    let out = algo::apply_in_with(surf, &fp, area, bounds, selection, canvas.union(&content), ctl);
-    filter_output(out, ctl.cancelled()).map(Some)
+    algo::try_apply_in_with(surf, &fp, area, bounds, selection, canvas.union(&content), ctl).map(Some).map_err(filter_error)
 }
 
 #[cfg(test)]
@@ -312,15 +311,9 @@ pub(crate) fn replay_with_cancellation_probe(
     replay_with_interrupt(id, params, surf, bounds, selection, canvas, ctl)
 }
 
-/// A filter's result. The filter also yields nothing when it cannot prepare its working data (a
-/// custom Shape Blur kernel it cannot allocate or does not accept): that is a failure to report,
-/// not a cancellation, unless the job was cancelled.
-fn filter_output(out: Option<photocraft_raster::Surface>, cancelled: bool) -> Result<photocraft_raster::Surface> {
-    match out {
-        Some(surface) => Ok(surface),
-        None if cancelled => Err(EngineError::Cancelled),
-        None => Err(EngineError::Other("the filter could not prepare its working data (not enough memory, or an unusable kernel)".into())),
-    }
+/// Preserve checked native diagnostics; legacy kernels retain their working-data failure.
+fn filter_error(error: algo::ApplyError) -> EngineError {
+    if error.is_cancelled() { EngineError::Cancelled } else { EngineError::Other(error.to_string()) }
 }
 
 pub(crate) fn has_filterable_layer(s: &Session) -> std::result::Result<(), String> {
@@ -408,8 +401,7 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
                         .stage(0.1, 1.0, &msg, |ctl| algo::coverage::apply_with(surf, operation, area, extent, sel, ctl))
                         .map_err(crate::coverage_cmds::error);
                 }
-                let out = ctx.stage(0.1, 1.0, &msg, |ctl| algo::apply_in_with(surf, fp, area, bounds, sel, extent, ctl));
-                filter_output(out, ctx.cancelled())
+                ctx.stage(0.1, 1.0, &msg, |ctl| algo::try_apply_in_with(surf, fp, area, bounds, sel, extent, ctl)).map_err(filter_error)
             };
             let selection = doc.selection.clone();
             let sel_bounds = selection.as_ref().map(photocraft_raster::Surface::content_bounds);
