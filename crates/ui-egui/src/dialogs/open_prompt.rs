@@ -94,6 +94,9 @@ pub struct Held {
     /// The Color Settings policy was already applied (a background open added it before it had
     /// to wait); otherwise opening applies it.
     pub policy_applied: bool,
+    /// Held by Open as Smart Object: the document holds the smart object layer already, and is
+    /// admitted by [`photocraft_engine::file_cmds::admit_as_smart_object`].
+    pub smart_object: bool,
     /// Private worker-time policy snapshot; never persisted in the document or public result.
     pub color_settings: Option<photocraft_engine::color_cmds::ColorSettings>,
     /// Worker-time EXIF preference for a deferred policy-only open.
@@ -302,7 +305,7 @@ pub fn answer(app: &mut PhotocraftApp, action: Option<&str>) -> Result<Value, St
         app.jobs.opens.clear();
         app.jobs.batches.clear();
         app.ui.dialogs.retain(|d| !owns(&d.fields) && !owns_damage(&d.fields) && !owns_memory(&d.fields) && !owns_historical(&d.fields));
-        app.ui.status = crate::i18n::fmt(tl!("Cancelled opening {name}"), &[("name", &name)]);
+        app.ui.status = crate::i18n::fmt(tl!("Canceled opening {name}"), &[("name", &name)]);
         app.ui.status_error = false;
         return Ok(json!({"cancelled": dropped}));
     };
@@ -407,7 +410,7 @@ pub(crate) fn answer_damage(app: &mut PhotocraftApp, accept: bool) -> Result<Val
         if let Some(pos) = app.prompt_order.iter().position(|p| *p == PromptKind::Open) {
             app.prompt_order.remove(pos);
         }
-        app.ui.status = crate::i18n::fmt(tl!("Cancelled opening {name}"), &[("name", &name)]);
+        app.ui.status = crate::i18n::fmt(tl!("Canceled opening {name}"), &[("name", &name)]);
         app.ui.status_error = false;
     }
     app.ui.dialogs.retain(|dialog| !owns_damage(&dialog.fields));
@@ -575,6 +578,7 @@ fn open(app: &mut PhotocraftApp, held: Held, action: Option<&str>) -> Result<Val
         order,
         question,
         policy_applied,
+        smart_object,
         color_settings,
         ignore_exif_profile_tag,
     } = held;
@@ -607,7 +611,12 @@ fn open(app: &mut PhotocraftApp, held: Held, action: Option<&str>) -> Result<Val
             app.open_failed(&name, &e.to_string());
             return Err(e.to_string());
         }
-        app.session.add_document(doc, None)
+        if smart_object { photocraft_engine::file_cmds::admit_as_smart_object(&mut app.session, doc) } else { app.session.add_document(doc, None) }
+    } else if smart_object {
+        let ignore_exif = app.session.prefs().file_handling.ignore_exif_profile_tag;
+        app.session.color.open_policy(&mut doc, ignore_exif);
+        app.session.prepare_imported_document(&mut doc, &photocraft_engine::jobs::JobCtx::new()).map_err(|e| e.to_string())?;
+        photocraft_engine::file_cmds::admit_as_smart_object(&mut app.session, doc)
     } else {
         match app.session.open_imported_document(doc, None, &photocraft_engine::jobs::JobCtx::new()) {
             Ok((index, _)) => index,
@@ -701,6 +710,10 @@ fn show_memory(app: &mut PhotocraftApp, prompt: &MemoryPrompt) {
     };
     message.push_str("\n\n");
     message.push_str(tl!("Opening this document uses more memory and may slow down your computer or other running applications."));
+    if available.is_some_and(|a| a.saturating_sub(prompt.estimated) < photocraft_io::memory::LOW_MEMORY_WARNING_MARGIN) {
+        message.push_str("\n\n");
+        message.push_str(tl!("Little memory would be left after opening this file. Close other apps first, or PhotoCraft may run out of memory."));
+    }
     if prompt.uncertain_capacity_warning {
         message.push_str("\n\n");
         message.push_str(tl!(
@@ -761,7 +774,7 @@ pub(crate) fn answer_memory(app: &mut PhotocraftApp, accept: bool) -> Result<Val
                     }
                 }
             } else {
-                app.ui.status = crate::i18n::fmt(tl!("Cancelled opening {name}"), &[("name", &name)]);
+                app.ui.status = crate::i18n::fmt(tl!("Canceled opening {name}"), &[("name", &name)]);
                 app.ui.status_error = false;
                 crate::jobs_ui::end_batch(app);
             }

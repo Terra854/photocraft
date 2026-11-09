@@ -100,9 +100,9 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
         return Some(fp);
     }
     Some(match id {
+        "filter.blur.average" => FilterParams::Average,
         "filter.blur.gaussianBlur" => FilterParams::GaussianBlur { radius: f(p, "radius", 1.0).clamp(0.1, 1000.0) },
         "filter.blur.boxBlur" => FilterParams::BoxBlur { radius: f(p, "radius", 1.0).clamp(1.0, 2000.0) },
-        "filter.blur.average" => FilterParams::Average,
         "filter.blur.motionBlur" => FilterParams::MotionBlur { angle: f(p, "angle", 0.0), distance: f(p, "distance", 10.0).clamp(1.0, 2000.0) },
         "filter.blur.radialBlur" => FilterParams::RadialBlur {
             amount: f(p, "amount", 10.0).clamp(1.0, 100.0),
@@ -290,7 +290,7 @@ fn replay_with_interrupt(
         return algo::convolution::apply_with(surf, options, area, canvas.union(&content), selection, ctl).map(Some).map_err(crate::coverage_cmds::error);
     }
     if matches!(fp, FilterParams::Average) {
-        return algo::average::apply_with(surf, area, bounds, selection, ctl).map(Some).map_err(crate::coverage_cmds::error);
+        return algo::average::apply_preserving_alpha_with(surf, area, bounds, selection, ctl).map(Some).map_err(crate::coverage_cmds::error);
     }
     if let Some(operation) = crate::coverage_cmds::operation(&fp) {
         return algo::coverage::apply_with(surf, operation, area, canvas.union(&content), selection, ctl).map(Some).map_err(crate::coverage_cmds::error);
@@ -381,7 +381,9 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
                         .map_err(crate::coverage_cmds::error);
                 }
                 if matches!(fp, FilterParams::Average) {
-                    return ctx.stage(0.1, 1.0, &msg, |ctl| algo::average::apply_with(surf, area, bounds, sel, ctl)).map_err(crate::coverage_cmds::error);
+                    return ctx
+                        .stage(0.1, 1.0, &msg, |ctl| algo::average::apply_preserving_alpha_with(surf, area, bounds, sel, ctl))
+                        .map_err(crate::coverage_cmds::error);
                 }
                 if let FilterParams::ChannelNoise(options) = fp {
                     return ctx
@@ -576,6 +578,7 @@ macro_rules! filter_cmd {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         filter_cmd!("filter.blur.gaussianBlur", "Gaussian Blur…", ["Filter", "Blur"], r##"{"radius":0.1..1000=1}"##),
+        filter_cmd!("filter.blur.average", "Average", ["Filter", "Blur"], "{}"),
         filter_cmd!("filter.blur.blur", "Blur", ["Filter", "Blur"], "{}"),
         filter_cmd!("filter.blur.blurMore", "Blur More", ["Filter", "Blur"], "{}"),
         filter_cmd!("filter.sharpen.sharpen", "Sharpen", ["Filter", "Sharpen"], "{}"),

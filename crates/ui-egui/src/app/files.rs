@@ -158,6 +158,7 @@ impl PhotocraftApp {
                 order,
                 question,
                 policy_applied: false,
+                smart_object: false,
                 color_settings: None,
                 ignore_exif_profile_tag: None,
             },

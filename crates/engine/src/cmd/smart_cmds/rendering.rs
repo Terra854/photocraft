@@ -37,7 +37,7 @@ pub fn apply_smart_filters(placed: &Surface, sm: &SmartObject, canvas: Rect) -> 
     // Edge pixels repeat at the canvas ∪ placed-content edge, as for layer filters.
     let extent = canvas.union(&placed.content_bounds());
     for f in sm.smart_filters.iter().filter(|f| f.visible) {
-        cur = apply_smart_filter(f, &cur, filter_bounds(f, placed, canvas), extent, &JobCtx::new())?;
+        cur = apply_smart_filter(f, sm, &cur, filter_bounds(f, placed, canvas), extent, &JobCtx::new())?;
     }
     Ok(match sm.filter_mask.as_ref().filter(|m| m.enabled) {
         Some(m) => photocraft_compose::filter_mask::mix(placed, &cur, m),
@@ -63,8 +63,9 @@ fn renders_in_object(f: &SmartFilter) -> bool {
 /// One visible smart filter over `cur`, blended with its blend mode and opacity. `Err` when the
 /// requesting session's authority denies the filter's params: callers surface the error instead of
 /// rendering (and caching) unfiltered pixels.
-fn apply_smart_filter(f: &SmartFilter, cur: &Surface, canvas: Rect, extent: Rect, ctx: &JobCtx) -> Result<Surface> {
-    apply_smart_filter_in(f, cur, canvas, extent, ctx)
+fn apply_smart_filter(f: &SmartFilter, sm: &SmartObject, cur: &Surface, canvas: Rect, extent: Rect, ctx: &JobCtx) -> Result<Surface> {
+    let params = crate::distort_cmds::placed_puppet_params(&f.command, &f.params, sm);
+    apply_smart_filter_in(f, &params, cur, canvas, extent, ctx)
 }
 
 /// The source placed in document pixels, before any smart filter.
@@ -375,9 +376,9 @@ pub(crate) fn prepared_source_image(doc: &Document, fmt: PixelFormat, mode: Opti
 
 /// Replay an ordinary native filter with interruption, preserving unknown-filter fallback and native blend/opacity
 /// mixing.
-fn apply_smart_filter_in(f: &SmartFilter, cur: &Surface, canvas: Rect, extent: Rect, ctx: &JobCtx) -> Result<Surface> {
+fn apply_smart_filter_in(f: &SmartFilter, params: &Value, cur: &Surface, canvas: Rect, extent: Rect, ctx: &JobCtx) -> Result<Surface> {
     ctx.check()?;
-    let out = match crate::filters::apply_filter_to_surface_in(&f.command, &f.params, cur, canvas, None, extent, ctx)? {
+    let out = match crate::filters::apply_filter_to_surface_in(&f.command, params, cur, canvas, None, extent, ctx)? {
         // Unknown ids (e.g. Photoshop filters we don't implement) leave the pixels alone.
         Some(out) => out,
         None => cur.clone(),
@@ -457,7 +458,7 @@ fn render_with_source_in(doc: &Document, sm: &SmartObject, ctx: &JobCtx, prepare
             Some(b) => b,
             None => *object_bounds.insert(filter_bounds(f, &placed()?.surface, canvas)),
         };
-        cur = Stage { surface: apply_smart_filter_in(f, &cur.surface, bounds, cur.extent, ctx)?, extent: cur.extent };
+        cur = Stage { surface: apply_smart_filter(f, sm, &cur.surface, bounds, cur.extent, ctx)?, extent: cur.extent };
         stack_cache::put(*key, &cur);
     }
     ctx.progress(1.0, "");
