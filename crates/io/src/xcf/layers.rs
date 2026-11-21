@@ -32,13 +32,18 @@ impl<'a> Image<'a> {
         Ok(())
     }
 
-    /// Bound retained hierarchy metadata before allocating it; omitted paths leave usable layers at the top level.
-    fn retained_item_path(&mut self, bytes: &[u8]) -> (Vec<u32>, bool) {
-        let count = (bytes.len() / 4).min(MAX_DEPTH + 1);
-        let Some(remaining) = self.meta_budget.checked_sub(count.saturating_mul(4)) else { return (Vec::new(), true) };
-        let path = bytes.as_chunks::<4>().0.iter().take(count).map(|word| u32::from_be_bytes(*word)).collect();
+    /// Admit only the final item path. Report separately whether its bytes were malformed or ran out of budget.
+    fn retained_item_path(&mut self, properties: &[Prop<'_>]) -> (Vec<u32>, bool, bool) {
+        let Some(property) = properties.iter().rfind(|property| property.kind == 30) else { return (Vec::new(), false, false) };
+        let (words, tail) = property.data.as_chunks::<4>();
+        if !tail.is_empty() {
+            return (Vec::new(), false, true);
+        }
+        let count = words.len().min(MAX_DEPTH + 1);
+        let Some(remaining) = self.meta_budget.checked_sub(count.saturating_mul(4)) else { return (Vec::new(), true, false) };
+        let path = words.iter().take(count).map(|word| u32::from_be_bytes(*word)).collect();
         self.meta_budget = remaining;
-        (path, false)
+        (path, false, false)
     }
 
     /// Decode layers in source order, then build the native hierarchy with the existing bounded-path policy.
@@ -720,14 +725,7 @@ impl<'a> Image<'a> {
         let mut apply_mask = true;
         let mut group = false;
         let mut expanded = true;
-        let (path, path_limited, invalid_path) = match lprops.iter().rfind(|p| p.kind == 30) {
-            Some(p) if p.data.len().is_multiple_of(4) => {
-                let (path, limited) = self.retained_item_path(p.data);
-                (path, limited, false)
-            }
-            Some(_) => (Vec::new(), false, true),
-            None => (Vec::new(), false, false),
-        };
+        let (path, path_limited, invalid_path) = self.retained_item_path(&lprops);
         let mut text = false;
         let mut vector = false;
         let mut link = false;
