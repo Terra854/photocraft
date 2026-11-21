@@ -181,3 +181,58 @@ fn refused_historical_start_retains_exact_source_and_choice_identity_for_retry()
     assert!(session.cancel_historical_xcf_open(ids[1]));
     assert_eq!(Arc::strong_count(&bytes), 1);
 }
+
+#[test]
+fn a_held_smart_object_open_is_not_recorded_before_the_user_answers() {
+    use serde_json::json;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("historical.xcf");
+    std::fs::write(&path, fixture::historical_pixel(true)).unwrap();
+    let params = json!({"path":path, "askHistoricalXcfSampleOrder":true});
+    for background in [false, true] {
+        let mut session = Session::new();
+        let reply = if background {
+            let Started::Job(id) = session.start("file.openAsSmartObject", params.clone()).unwrap() else { panic!("background job") };
+            session.wait_job(id).unwrap()
+        } else {
+            session.execute("file.openAsSmartObject", params.clone()).unwrap()
+        };
+        assert!(reply["heldHistoricalXcfOpen"].is_u64(), "{reply}");
+        assert!(session.documents().is_empty());
+        assert!(session.journal.is_empty(), "{:?}", session.journal);
+    }
+}
+
+#[test]
+fn psd_preflights_and_historical_questions_share_retained_capacity() {
+    use crate::jobs::{PendingPsdPreflight, SourceFingerprint};
+
+    let question = photocraft_io::HistoricalXcfSampleOrderRequest { version: 7, bits_per_sample: 16 };
+    let budget = 100;
+    let shared = Arc::new(Vec::with_capacity(60));
+    let other = Arc::new(Vec::with_capacity(50));
+    let preflight = |bytes| {
+        let source = OpenSource::Bytes(bytes);
+        let fingerprint = SourceFingerprint::of(&source).unwrap();
+        PendingPsdPreflight {
+            id: 0,
+            name: "pending.psd".into(),
+            source,
+            fingerprint,
+            required: 1000,
+            soft_limit: 500,
+            hard_limit: 2000,
+            available_ram: None,
+            confirm_damage: true,
+        }
+    };
+    let mut session = Session::new();
+    let psd = session.store_pending_preflight_with_limit(preflight(shared.clone()), budget).unwrap();
+    assert!(hold_with_budget(&mut session, "other.xcf".into(), other.clone(), question, Default::default(), Destination::Open, budget).is_err());
+    let xcf = hold_with_budget(&mut session, "shared.xcf".into(), shared, question, Default::default(), Destination::Open, budget).unwrap();
+    assert!(session.cancel_pending_preflight(psd).is_some());
+    assert!(session.store_pending_preflight_with_limit(preflight(other.clone()), budget).is_err());
+    assert!(session.cancel_historical_xcf_open(xcf["heldHistoricalXcfOpen"].as_u64().unwrap()));
+    assert!(session.store_pending_preflight_with_limit(preflight(other), budget).is_ok());
+}

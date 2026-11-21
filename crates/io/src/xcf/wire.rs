@@ -414,7 +414,6 @@ fn plausible_property(bytes: Option<&[u8]>) -> bool {
     match (kind, length) {
         (Some(0), Some(_)) => true,
         (Some(17), Some(n)) => (1..=MAX_PAYLOAD).contains(&(n as usize)),
-        (Some(19), Some(n)) => (8..=MAX_PAYLOAD).contains(&(n as usize)),
         (Some(1..), Some(n)) => n as usize <= MAX_PAYLOAD,
         _ => false,
     }

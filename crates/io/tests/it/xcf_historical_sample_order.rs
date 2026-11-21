@@ -227,6 +227,7 @@ fn assert_pixels(document: &Document, sample: Sample, gray: bool) {
     assert_eq!(document.depth, sample.native_depth());
     let layer = &document.layers[0];
     let LayerContent::Raster(surface) = &layer.content else { panic!("native raster") };
+    assert_eq!(surface.channels(), if gray { 2 } else { 4 });
     let mask = &layer.mask.as_ref().unwrap().surface;
     let channel = &document.channels[0].surface;
     for (x, y) in [(0, 0), (1, 0), (63, 0), (64, 0), (0, 1), (64, 1)] {
@@ -280,7 +281,8 @@ fn byte_order_and_precision_report_independent_outcomes_for_historical_u32() {
 fn file_open_keeps_historical_xcf_options_view_report_and_magic_priority() {
     use photocraft_doc::import_conversion::ImportConversion;
     use std::io::Write;
-    let path = std::env::temp_dir().join(format!("photocraft-historical-xcf-file-open-{}.data", std::process::id()));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("historical-xcf.data");
     for order in [Order::LittleEndian, Order::BigEndian] {
         let source = image_with_initial_view(9, Sample::Float, order, false, 0, true);
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -315,7 +317,6 @@ fn file_open_keeps_historical_xcf_options_view_report_and_magic_priority() {
             }
         }
     }
-    std::fs::remove_file(path).unwrap();
 }
 
 /// Verify all supported outer transports preserve the typed order request and native pixel planes, including source-free native persistence.

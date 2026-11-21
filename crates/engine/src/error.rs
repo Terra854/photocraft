@@ -41,6 +41,9 @@ pub enum EngineError {
     /// The document is discarded and is not opened.
     #[error("“{name}” changed since it was checked; open it again to approve the new file")]
     SourceChanged { name: String },
+    /// Reading the picked linked source failed before it could be verified or imported.
+    #[error("can't read {path}: {message}")]
+    LinkedSourceRead { path: String, kind: std::io::ErrorKind, message: String },
     /// The linked XCF no longer matches the bytes approved for a sample order.
     #[error("{0}")]
     HistoricalXcfLinkChanged(&'static str),

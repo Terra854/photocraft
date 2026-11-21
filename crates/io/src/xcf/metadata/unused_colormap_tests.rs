@@ -319,3 +319,24 @@ fn palette_lookahead_skips_large_properties_without_accepting_empty_tables_insid
         }
     }
 }
+
+#[test]
+fn a_repaired_palette_can_be_followed_by_short_and_valid_dpi_records() {
+    let mut image = TestImage::rgb8(1, 1);
+    image.version = 26;
+    image.image_props.push((1, vec![0, 0, 0, 1, 255, 0, 0]));
+    image.image_props.push((19, 72f32.to_be_bytes().to_vec()));
+    image.image_props.push((19, [240f32.to_be_bytes(); 2].concat()));
+    image.layers.push(TestLayer::rgba("Saved raster", 1, 1, vec![17, 31, 57, 255]));
+    let mut bytes = image.write();
+    let record = [1u32.to_be_bytes(), 7u32.to_be_bytes(), [0, 0, 0, 1]].concat();
+    let at = bytes.windows(record.len()).position(|slice| slice == record).unwrap();
+    bytes[at + 4..at + 8].copy_from_slice(&5u32.to_be_bytes());
+    let wrapped = crabz2::compress(&bytes, crabz2::Level::default());
+    for (name, payload) in [("short-dpi.xcf", bytes), ("short-dpi.xcf.bz2", wrapped)] {
+        let opened = crate::import(name, &payload).unwrap();
+        assert_eq!(opened.document.resolution_dpi, 240.);
+        assert_eq!(opened.document.layers[0].surface().unwrap().pixel(0, 0), [17. / 255., 31. / 255., 57. / 255., 1.]);
+        assert_eq!(crate::xcf::source_geometry(name, &payload, &photocraft_raster::Interrupt::NONE).unwrap(), Some(((1., 1.), 240.)));
+    }
+}

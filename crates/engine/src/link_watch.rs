@@ -154,11 +154,13 @@ fn saved_digest(doc: &Document, layer: u64) -> Option<[u8; 32]> {
 /// Resolve the disk paths and identify first observations that need a fingerprint.
 fn resolved_files(s: &Session, st: &crate::DocState) -> Vec<ResolvedLink> {
     let document = st.path.as_deref().map(std::path::Path::new);
+    let can_check_digest = s.active_job().is_none();
     linked_files_by_path(&st.doc)
         .into_iter()
         .map(|(path, layers)| {
             let file = crate::doc_path::resolve_in(&path, document).ok();
-            let check_first_digest = file.is_some()
+            let check_first_digest = can_check_digest
+                && file.is_some()
                 && s.link_stamps.get(&(st.doc.id.0, path.clone())).is_none_or(|stamp| !stamp.digest_checked)
                 && layers.has_historical_digest
                 && s.authorize.is_none_or(|gate| gate("layer.smartObjects.updateModifiedContent", &json!({"path":path})).is_ok());
@@ -168,6 +170,16 @@ fn resolved_files(s: &Session, st: &crate::DocState) -> Vec<ResolvedLink> {
 }
 
 impl Session {
+    /// Save As can change what a stored path names. Discard the pending look and
+    /// forget any prior stamp whose resolved source changed, including its digest.
+    pub(crate) fn invalidate_link_scan_for_save(&mut self, doc: u64, before: Option<&str>, after: &str) {
+        use std::path::Path;
+        self.link_scan = None;
+        self.link_stamps.retain(|(id, path), _| {
+            *id != doc || crate::doc_path::resolve_in(path, before.map(Path::new)) == crate::doc_path::resolve_in(path, Some(Path::new(after)))
+        });
+    }
+
     /// Start stamping the active document's linked files on a worker thread, unless a look is
     /// still running (or the build has no files to look at: the web app).
     pub fn start_link_scan(&mut self) {
@@ -294,13 +306,24 @@ impl Session {
             let mut stale = None;
             let r = self.edit("Update Modified Content", |d, _| {
                 let mut refreshed = Vec::new();
+                let mut failure = None;
                 for id in ids {
+                    if failure.is_some() && saved_digest(d, id).is_none() {
+                        continue;
+                    }
                     match crate::smart_cmds::refresh(d, LayerId(id)) {
                         Ok(true) => refreshed.push(id),
                         Err(EngineError::HistoricalXcfLinkChanged(message)) => stale = Some(message),
-                        Ok(false) => return Err(EngineError::Other(format!("{path} can't be read"))),
-                        Err(error) => return Err(error),
+                        Ok(false) => {
+                            failure.get_or_insert_with(|| EngineError::Other(format!("{path} can't be read")));
+                        }
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                        }
                     }
+                }
+                if let Some(error) = failure {
+                    return Err(error);
                 }
                 if refreshed.is_empty()
                     && let Some(message) = stale
@@ -467,6 +490,77 @@ mod tests {
     }
 
     #[test]
+    fn save_as_drops_the_old_scan_and_checks_the_new_relative_source_at_the_same_stamp() {
+        use crate::jobs::historical_xcf_fixture::historical_pixel;
+        let folder = tempfile::tempdir().unwrap();
+        let other = folder.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let source = folder.path().join("source.xcf");
+        let replacement = other.join("source.xcf");
+        std::fs::write(&source, historical_pixel(false)).unwrap();
+        std::fs::write(&replacement, historical_pixel(true)).unwrap();
+        let timestamp = std::fs::metadata(&source).unwrap().modified().unwrap();
+        std::fs::File::options().write(true).open(&replacement).unwrap().set_times(std::fs::FileTimes::new().set_modified(timestamp)).unwrap();
+        assert_eq!(super::stamp(Some(&source)), super::stamp(Some(&replacement)));
+        let mut session = Session::new();
+        session.execute("file.new", json!({"width":1,"height":1})).unwrap();
+        session.saved_to(folder.path().join("original.pcraft").to_string_lossy().into_owned());
+        let layer = session.execute("file.placeLinked", json!({"path":source,"historicalXcfSampleOrder":"big-endian"})).unwrap()["layer"].as_u64().unwrap();
+        session
+            .edit("Store a relative link", |doc, _| {
+                let Some(photocraft_doc::LayerContent::Smart(smart)) = doc.layer_mut(photocraft_doc::LayerId(layer)).map(|layer| &mut layer.content) else {
+                    panic!("smart object")
+                };
+                smart.source = photocraft_doc::SmartSource::Linked { path: "source.xcf".into() };
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(session.execute("layer.smartObjects.updateChanged", json!({})).unwrap(), json!({"updated":[]}));
+        session.start_link_scan();
+        assert!(session.link_scan.is_some());
+        session.saved_to(other.join("copy.pcraft").to_string_lossy().into_owned());
+        assert!(session.link_scan.is_none());
+        let update = session.execute("layer.smartObjects.updateChanged", json!({})).unwrap();
+        assert_eq!(update["updated"], json!([]));
+        assert!(update["warnings"][0].as_str().unwrap().contains("relink and choose"));
+    }
+
+    #[test]
+    fn the_busy_document_defers_its_first_digest_without_deferring_metadata() {
+        use crate::jobs::{Started, historical_xcf_fixture::historical_pixel};
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("source.xcf");
+        std::fs::write(&path, historical_pixel(false)).unwrap();
+        let mut session = Session::new();
+        session.execute("file.new", json!({"width":1,"height":1})).unwrap();
+        session.execute("file.placeLinked", json!({"path":path,"historicalXcfSampleOrder":"big-endian"})).unwrap();
+        let Started::Job(id) = session
+            .start_job(
+                "filter.blur.gaussianBlur",
+                json!({}),
+                "Held job",
+                true,
+                |ctx| {
+                    loop {
+                        ctx.check()?;
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                },
+                |_, ()| Ok(json!({})),
+            )
+            .unwrap()
+        else {
+            panic!("background job")
+        };
+        let mut links = super::resolved_files(&session, session.active().unwrap());
+        let link = links.pop().unwrap();
+        assert!(!link.check_first_digest);
+        assert!(link.observe().stamp.is_some());
+        assert!(session.cancel_job(id));
+        assert!(super::resolved_files(&session, session.active().unwrap())[0].check_first_digest);
+    }
+
+    #[test]
     fn a_stale_historical_link_does_not_block_a_healthy_link_to_the_same_path() {
         use crate::jobs::historical_xcf_fixture::{historical_pixel, modern_pixel};
         for historical_first in [false, true] {
@@ -500,6 +594,15 @@ mod tests {
             let pixel = doc.layer(photocraft_doc::LayerId(current)).unwrap().surface().unwrap().pixel(0, 0);
             assert!((pixel[0] - f32::from(0x4321u16) / 65535.).abs() <= 1. / 65535.);
             assert_eq!(s.execute("layer.smartObjects.updateChanged", json!({})).unwrap(), json!({"updated":[]}));
+
+            // The ordinary link cannot decode this replacement without a byte order. Its
+            // failure rolls back the edit but must not hide the stale historical link.
+            let before = s.active().unwrap().doc.clone();
+            save(&path, &historical_pixel(false));
+            let refused = s.execute("layer.smartObjects.updateChanged", json!({})).unwrap();
+            assert_eq!(refused["updated"], json!([]));
+            assert!(refused["warnings"][0].as_str().unwrap().contains("relink and choose"));
+            assert!(std::sync::Arc::ptr_eq(&s.active().unwrap().doc, &before));
         }
     }
 

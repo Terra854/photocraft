@@ -83,15 +83,21 @@ fn historical_byte_placements_store_the_explicit_source_interpretation() {
         for linked in [None, Some("not-read-during-byte-placement.xcf".into())] {
             let mut s = session();
             let bytes = fixture::historical_pixel(little);
-            let started = s.start_place_bytes("source.xcf", bytes.clone(), linked, json!({"historicalXcfSampleOrder":order})).unwrap();
+            let started = s.start_place_bytes("source.xcf", bytes.clone(), linked.clone(), json!({"historicalXcfSampleOrder":order})).unwrap();
             let reply = match started {
                 Started::Done(reply) => reply,
                 Started::Job(id) => s.wait_job(id).unwrap(),
             };
             let id = LayerId(reply["layer"].as_u64().unwrap());
             assert_eq!(object(&s, id).historical_xcf_sample_order, Some(interpretation));
-            if let SmartSource::Embedded { bytes: retained, .. } = &object(&s, id).source {
-                assert_eq!(retained.as_slice(), bytes);
+            let smart = object(&s, id);
+            match (linked.as_deref(), &smart.source) {
+                (Some(expected), SmartSource::Linked { path }) => {
+                    assert_eq!(path, expected);
+                    assert_eq!(smart.historical_xcf_link_digest, Some(photocraft_io::linked::historical_xcf_digest(&bytes)));
+                }
+                (None, SmartSource::Embedded { bytes: retained, .. }) => assert_eq!(retained.as_slice(), bytes),
+                (_, source) => panic!("unexpected placement source {source:?}"),
             }
         }
     }
@@ -507,4 +513,19 @@ fn a_psd_embedded_historical_source_without_pcxo_recovers_in_edit_contents() {
     assert_child_pixels(&reopened);
     assert!(reopened.set_active(0));
     assert_eq!(object(&reopened, id).historical_xcf_sample_order, Some(HistoricalXcfSampleOrder::BigEndian));
+}
+
+#[test]
+fn relink_read_errors_keep_the_original_kind_and_requested_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("missing.xcf");
+    let mut session = session();
+    let placed = session.start_place_bytes("old.xcf", fixture::historical_pixel(true), None, json!({"historicalXcfSampleOrder":"little-endian"})).unwrap();
+    let result = match placed {
+        Started::Done(result) => result,
+        Started::Job(id) => session.wait_job(id).unwrap(),
+    };
+    let id = result["layer"].as_u64().unwrap();
+    let error = session.execute("layer.smartObjects.relinkToFile", json!({"layer":id,"path":path})).unwrap_err();
+    assert!(matches!(error, EngineError::LinkedSourceRead { path: requested, kind: std::io::ErrorKind::NotFound, .. } if requested == path.to_string_lossy()));
 }

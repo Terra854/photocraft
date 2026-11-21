@@ -277,7 +277,9 @@ impl<'a> Outcomes<'a> {
                     .into(),
             attachments: Vec::new(),
         })?;
-        if index != OMITTED_OWNER && self.pending.len() < MAX_CONVERSION_ATTACHMENTS {
+        // Each candidate owns one already-budgeted report entry. The entry ceiling also
+        // bounds the separate borrowed scratch storage, without using the attachment count.
+        if index != OMITTED_OWNER && self.pending.try_reserve(1).is_ok() {
             self.pending.push(Pending { entry: index, retained_owner, property, bytes, reason });
         }
         Ok(())
@@ -335,6 +337,9 @@ impl<'a> Outcomes<'a> {
         self.report.validate().map_err(|e| invalid(e.to_string()))?;
         let mut payload_bytes = 0usize;
         for pending in self.pending {
+            if self.report.attachments.len() == MAX_CONVERSION_ATTACHMENTS {
+                break;
+            }
             let owner = self.report.entries.get(pending.entry).ok_or_else(|| invalid("missing XCF configuration outcome"))?;
             let mut attachment = RetainedImportData {
                 owner: owner.source.clone(),
@@ -478,6 +483,32 @@ mod tests {
         assert_eq!(report.entries[ids[0]].disposition, ConversionDisposition::RetainedUnapplied);
         assert_eq!(report.entries[ids[1]].disposition, ConversionDisposition::SkippedNonessential);
         assert_eq!(report.attachments.len(), 1);
+    }
+
+    #[test]
+    fn rejected_candidates_do_not_consume_the_retained_attachment_count() {
+        let mut outcomes = Outcomes::new(26).unwrap();
+        let owner = outcomes
+            .push(ConversionEntry {
+                feature_code: "xcf.layer".into(),
+                source: source("layer", 0, 20, "Owner", &[], None),
+                targets: Vec::new(),
+                disposition: ConversionDisposition::NativeEquivalent,
+                reason: ConversionReason::NativePolicy,
+                source_description: String::new(),
+                native_description: String::new(),
+                attachments: Vec::new(),
+            })
+            .unwrap();
+        let oversized = [0; 4096];
+        for offset in 0..MAX_CONVERSION_ATTACHMENTS {
+            outcomes.property(owner, 999, offset, &oversized).unwrap();
+        }
+        outcomes.property(owner, 1000, MAX_CONVERSION_ATTACHMENTS, b"x").unwrap();
+        outcomes.retained = MAX_CONVERSION_BYTES - 1024;
+        let ImportConversion::Report(report) = outcomes.finish().unwrap() else { panic!("typed report") };
+        assert_eq!(report.attachments.len(), 1);
+        assert_eq!(report.attachments[0].bytes.as_slice(), b"x");
     }
 
     /// Exercise the attachment-count ceiling and require excess optional records to remain visibly omitted in a valid report.

@@ -1,9 +1,9 @@
 //! Native layer admission, metadata retention and hierarchy construction.
 
 use super::{
-    AlphaChannel, BlendMode, Channel, ConversionDisposition, ConversionEntry, ConversionReason, Image, Interrupt, IoError, LabelColor, Layer, LayerContent,
-    LayerMask, MAX_DEPTH, NativeTargetRef, Node, PendingLayerEffects, PixelFormat, Pixels, Prop, Rect, Result, Surface, be_f32, be_i32, be_u32, blend_mode,
-    conversion, drawable_rect, finish, invalid, label, metadata, paths, place, props, resources, text, write_pixels,
+    AlphaChannel, BlendMode, Channel, ConversionDisposition, ConversionEntry, ConversionReason, Image, Interrupt, IoError, ItemLevel, LabelColor, Layer,
+    LayerContent, LayerMask, MAX_DEPTH, NativeTargetRef, Node, PendingLayerEffects, PixelFormat, Pixels, Prop, Rect, Result, Surface, be_f32, be_i32, be_u32,
+    blend_mode, conversion, drawable_rect, finish, invalid, label, metadata, paths, place, props, resources, text, write_pixels,
 };
 
 // Each vector style can construct two color transforms, even for a small ICC
@@ -56,7 +56,7 @@ impl<'a> Image<'a> {
                 nodes.push(node);
             }
         }
-        let mut roots: Vec<Node> = Vec::new();
+        let mut roots = ItemLevel::default();
         let mut recovered = Vec::new();
         for node in nodes {
             if node.path_omitted {
@@ -79,10 +79,10 @@ impl<'a> Image<'a> {
         }
         // Restore top-level stacking order after the source paths have resolved.
         if !recovered.is_empty() {
-            roots.extend(recovered);
-            roots.sort_unstable_by_key(|node| node.source_ordinal);
+            roots.nodes.extend(recovered);
+            roots.nodes.sort_unstable_by_key(|node| node.source_ordinal);
         }
-        Ok((finish(roots), linear_compositing))
+        Ok((finish(roots.nodes), linear_compositing))
     }
 
     /// Decode saved selection and alpha coverage, retaining duplicate markers and applying native view hints once.
@@ -359,7 +359,7 @@ impl<'a> Image<'a> {
     pub(super) fn layer_text(&mut self, layer: &mut Layer, properties: &[Prop<'a>], position: (i32, i32), outcome: usize, ctl: &Interrupt<'_>) -> Result<()> {
         ctl.check().map_err(|_| IoError::Cancelled)?;
         let (x, y) = position;
-        let flags = properties.iter().find(|p| p.kind == 26).and_then(|p| be_u32(p.data)).unwrap_or(0);
+        let flags = properties.iter().rfind(|p| p.kind == 26).and_then(|p| be_u32(p.data)).unwrap_or(0);
         let mut config: Option<(&str, &[u8])> = None;
         for property in properties.iter().filter(|p| p.kind == 21) {
             let mut native = None;
@@ -549,7 +549,10 @@ impl<'a> Image<'a> {
                 if self.outcomes.parasites_with_work(outcome, property.offset, property.data, &["gimphoto-clipped"], &mut self.report_parasite_work, ctl)? {
                     self.metadata_limit(outcome, "xcf.parasite_work", "Layer parasite reporting exceeded the shared scan-work allowance")?;
                 }
-            } else if (property.kind == 29 && !property.data.is_empty()) || (property.kind == 30 && !property.data.len().is_multiple_of(4)) {
+            } else if (property.kind == 29 && !property.data.is_empty())
+                || (property.kind == 30 && !property.data.len().is_multiple_of(4))
+                || (property.kind == 33 && (property.data.len() != 4 || !be_f32(property.data).is_some_and(|v| (0.0..=1.0).contains(&v))))
+            {
                 self.outcomes.property_with_reason(outcome, property.kind, property.offset, property.data, ConversionReason::InvalidOptionalData)?;
             } else if !matches!(property.kind, 6 | 7 | 8 | 9 | 10 | 11 | 15 | 20 | 28 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 48) {
                 let reason = match property.kind {
@@ -717,9 +720,14 @@ impl<'a> Image<'a> {
         let mut apply_mask = true;
         let mut group = false;
         let mut expanded = true;
-        let mut path = Vec::new();
-        let mut path_limited = false;
-        let mut invalid_path = false;
+        let (path, path_limited, invalid_path) = match lprops.iter().rfind(|p| p.kind == 30) {
+            Some(p) if p.data.len().is_multiple_of(4) => {
+                let (path, limited) = self.retained_item_path(p.data);
+                (path, limited, false)
+            }
+            Some(_) => (Vec::new(), false, true),
+            None => (Vec::new(), false, false),
+        };
         let mut text = false;
         let mut vector = false;
         let mut link = false;
@@ -738,7 +746,7 @@ impl<'a> Image<'a> {
             match p.kind {
                 5 => floating = true,
                 6 => opacity = (v.min(255) as f32) / 255.0,
-                33 => float_opacity = be_f32(p.data).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0)).or(float_opacity),
+                33 if p.data.len() == 4 => float_opacity = be_f32(p.data).filter(|v| (0.0..=1.0).contains(v)).or(float_opacity),
                 7 => layer_mode = v,
                 8 => visible = v != 0,
                 9 => legacy_linked = v != 0,
@@ -752,16 +760,6 @@ impl<'a> Image<'a> {
                 20 => tattoo = (v != 0).then_some(v),
                 28 => locks.pixels = v != 0,
                 29 if p.data.is_empty() => group = true,
-                30 if p.data.len().is_multiple_of(4) => {
-                    let (retained, limited) = self.retained_item_path(p.data);
-                    path = retained;
-                    path_limited |= limited;
-                    invalid_path = false;
-                }
-                30 => {
-                    path.clear();
-                    invalid_path = true;
-                }
                 31 => expanded = v & 1 != 0,
                 32 => locks.position = v != 0,
                 34 => tag = label(v),
@@ -834,7 +832,7 @@ impl<'a> Image<'a> {
         let native_space = if self.precision.linear {
             1
         } else if self.precision.perceptual {
-            3
+            4
         } else {
             2
         };
@@ -955,7 +953,7 @@ impl<'a> Image<'a> {
             }
         }
         let path_omitted = invalid_path || (path_limited && path.is_empty());
-        Ok(Some((Node { layer, source_ordinal: ordinal, path, path_omitted, group, children: Vec::new(), outcome }, linear)))
+        Ok(Some((Node { layer, source_ordinal: ordinal, path, path_omitted, group, children: ItemLevel::default(), outcome }, linear)))
     }
 }
 

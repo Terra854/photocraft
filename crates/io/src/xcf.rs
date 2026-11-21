@@ -344,7 +344,8 @@ impl<'a> Image<'a> {
         let count = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(channels)).ok_or_else(|| invalid("drawable overflow"))?;
         let bytes = count.checked_mul(4).ok_or_else(|| invalid("drawable overflow"))?;
         let scratch_count = if target.is_some() { w.min(TILE) as usize * h.min(TILE) as usize * channels } else { count };
-        self.budget = self.budget.checked_sub(scratch_count * 4).ok_or_else(|| invalid("the layers exceed the 1 GiB pixel limit"))?;
+        let scratch_bytes = scratch_count * 4;
+        self.budget = self.budget.checked_sub(scratch_bytes).ok_or_else(|| invalid("the layers exceed the 1 GiB pixel limit"))?;
         if let Some((surface, rect)) = &target {
             if (rect.width(), rect.height()) != (w, h) || surface.channels() != channels {
                 return Err(invalid("hierarchy dimensions or layout differ from its declared drawable"));
@@ -470,6 +471,8 @@ impl<'a> Image<'a> {
                 .budget
                 .checked_sub(bytes.max(usize::try_from(stored).unwrap_or(usize::MAX)))
                 .ok_or_else(|| invalid("the layers exceed the 1 GiB pixel limit"))?;
+            drop(data);
+            self.budget += scratch_bytes;
             data = Vec::new();
         }
         Ok(Pixels { width: w, height: h, channels, data, underflow, coverage_clamped, palette_fallback })
@@ -537,7 +540,7 @@ impl<'a> Image<'a> {
         }
         self.outcomes.warning(
             owner,
-            "has stored coverage effects retained as inactive configuration; auxiliary mask pixels are not retained; see the conversion report",
+            "has stored coverage effects that were not applied; auxiliary mask pixels are not retained; see the conversion report",
             &mut self.warnings,
         )?;
         if !self.outcomes.recording() {
@@ -574,7 +577,7 @@ impl<'a> Image<'a> {
                     feature_code: "xcf.coverage_effect".into(),
                     source,
                     targets: current_owner.targets.clone(),
-                    disposition: ConversionDisposition::RetainedUnapplied,
+                    disposition: ConversionDisposition::SkippedNonessential,
                     reason: ConversionReason::InvalidOptionalData,
                     source_description: "Repeated or excessively nested coverage-effect reference".into(),
                     native_description: "Native coverage preserved; cyclic source effect configuration was not followed".into(),
@@ -601,7 +604,7 @@ impl<'a> Image<'a> {
                         feature_code: "xcf.coverage_effect".into(),
                         source,
                         targets: current_owner.targets.clone(),
-                        disposition: ConversionDisposition::RetainedUnapplied,
+                        disposition: ConversionDisposition::SkippedNonessential,
                         reason: ConversionReason::InvalidOptionalData,
                         source_description: format!("Coverage-effect framing could not be decoded: {error}"),
                         native_description: "Usable native coverage preserved; malformed optional effect was not applied".into(),
@@ -632,7 +635,7 @@ impl<'a> Image<'a> {
                 feature_code: "xcf.coverage_effect".into(),
                 source,
                 targets: current_owner.targets.clone(),
-                disposition: ConversionDisposition::RetainedUnapplied,
+                disposition: ConversionDisposition::SkippedNonessential,
                 reason,
                 source_description: format!(
                     "{} version {}; visible {}, opacity {}; {} ordered arguments ({} config bytes, {} string bytes); inert icon {}; {} {}",
@@ -653,7 +656,7 @@ impl<'a> Image<'a> {
             if !self.outcomes.recording() {
                 return Ok(());
             }
-            self.outcomes.property_with_reason(outcome, 45, effect.record_offset, effect.raw, reason)?;
+            self.outcomes.primary_property(outcome, 45, effect.record_offset, effect.raw, reason)?;
             for property in effect.unknown_properties {
                 self.outcomes.property(outcome, property.kind, property.offset, property.bytes)?;
             }
@@ -764,6 +767,32 @@ impl<'a> Image<'a> {
     }
 }
 
+#[derive(Default)]
+struct ItemLevel {
+    nodes: Vec<Node>,
+    /// Source indices for placed groups with explicit item paths. Native indices may be compacted.
+    groups: std::collections::BTreeMap<u32, usize>,
+}
+
+impl ItemLevel {
+    fn group_children(&mut self, index: u32) -> Option<&mut Self> {
+        if let Some(&native_index) = self.groups.get(&index) {
+            return self.nodes.get_mut(native_index).map(|group| &mut group.children);
+        }
+        // Some XCF writers omit paths on top-level groups. Preserve their positional meaning.
+        self.nodes.get_mut(index as usize).filter(|node| node.group && node.path.is_empty()).map(|group| &mut group.children)
+    }
+
+    fn push(&mut self, node: Node) {
+        if node.group
+            && let Some(&index) = node.path.last()
+        {
+            self.groups.entry(index).or_insert(self.nodes.len());
+        }
+        self.nodes.push(node);
+    }
+}
+
 /// A layer as read, before the tree is built.
 struct Node {
     layer: Layer,
@@ -771,7 +800,7 @@ struct Node {
     path: Vec<u32>,
     path_omitted: bool,
     group: bool,
-    children: Vec<Node>,
+    children: ItemLevel,
     outcome: usize,
 }
 
@@ -1862,13 +1891,9 @@ fn import_vectors(document: &mut Document, image: &mut Image<'_>, ctl: &Interrup
 }
 
 /// Keep recovered nodes outside the source index space until placement ends.
-fn place(roots: &mut Vec<Node>, recovered: &mut Vec<Node>, node: Node, warnings: &mut Warnings, outcomes: &mut conversion::Outcomes<'_>) -> Result<()> {
+fn place(roots: &mut ItemLevel, recovered: &mut Vec<Node>, node: Node, warnings: &mut Warnings, outcomes: &mut conversion::Outcomes<'_>) -> Result<()> {
     let depth = node.path.len().saturating_sub(1);
-    let destination = node
-        .path
-        .iter()
-        .take(depth)
-        .try_fold(&mut *roots, |level, &index| level.get_mut(index as usize).filter(|node| node.group).map(|group| &mut group.children));
+    let destination = node.path.iter().take(depth).try_fold(roots, |level, &index| level.group_children(index));
     if let Some(level) = destination {
         level.push(node);
     } else {
@@ -1890,7 +1915,7 @@ fn finish(nodes: Vec<Node>) -> Vec<Layer> {
     let mut out = Vec::with_capacity(nodes.len());
     for mut node in nodes.into_iter().rev() {
         if node.group {
-            let children = finish(std::mem::take(&mut node.children));
+            let children = finish(std::mem::take(&mut node.children.nodes));
             if let Some(c) = node.layer.children_mut() {
                 *c = children;
             }

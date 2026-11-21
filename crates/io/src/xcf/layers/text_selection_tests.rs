@@ -83,3 +83,22 @@ fn incompatible_pango_caps_keep_saved_pixels_and_the_source_markup() {
     assert!(imported.warnings.iter().any(|warning| warning.contains("opens as pixels")));
     roundtrip(imported, &[markup]);
 }
+
+#[test]
+fn the_final_text_flags_protect_manually_modified_pixels() {
+    for (earlier, final_flags) in [(0u32, 2u32), (2, 0)] {
+        let mut image = TestImage::rgb8(1, 1);
+        image.version = 26;
+        let mut layer = TestLayer::rgba("Manually edited text", 1, 1, vec![17, 31, 57, 255]);
+        layer.props = vec![
+            (26, earlier.to_be_bytes().to_vec()),
+            (21, property(&[("gimp-text-layer", &native("editable text"))])),
+            (26, final_flags.to_be_bytes().to_vec()),
+        ];
+        image.layers.push(layer);
+        let imported = crate::import("duplicate-text-flags.xcf", &image.write()).unwrap();
+        let layer = &imported.document.layers[0];
+        assert_eq!(matches!(layer.content, LayerContent::Raster(_)), final_flags == 2);
+        assert_eq!(layer.surface().unwrap().pixel(0, 0), [17. / 255., 31. / 255., 57. / 255., 1.]);
+    }
+}

@@ -67,9 +67,26 @@ fn svg_prefix_recognizes_a_large_drawing_without_validating_its_unread_body() {
 
 #[test]
 fn compressed_svg_under_a_plain_xcf_suffix_falls_back_to_svg_geometry() {
-    let wrapped = gzip(b"<svg xmlns='http://www.w3.org/2000/svg' width='40' height='30'><rect x='10' y='12' width='5' height='6'/></svg>");
+    let mut wrapped = gzip(b"<svg xmlns='http://www.w3.org/2000/svg' width='40' height='30'><rect x='10' y='12' width='5' height='6'/></svg>");
+    wrapped.extend_from_slice(b"\0\0tail");
+    assert!(decode_import("Drawing.XCF", &wrapped, &Interrupt::NONE, true).unwrap().is_some());
     assert!(crate::xcf::source_geometry("Drawing.XCF", &wrapped, &Interrupt::NONE).unwrap().is_none());
     let geometry = crate::linked::source_geometry("Drawing.XCF", &wrapped, &Interrupt::NONE).unwrap();
     assert_eq!(geometry.0, (40.0, 30.0));
     assert!(crate::xcf::source_geometry("Drawing.xcf.gz", &wrapped, &Interrupt::NONE).is_err());
+}
+
+#[test]
+fn a_cancel_observed_only_during_prefix_read_is_still_typed() {
+    use std::sync::atomic::AtomicBool;
+    let xcf = [MAGIC, &[0; 64]].concat();
+    for bytes in [xcf.clone(), gzip(&xcf)] {
+        let armed = AtomicBool::new(false);
+        let ctl = || armed.swap(false, Ordering::Relaxed);
+        let result = with_xcf_prefix("source.xcf", &bytes, &Interrupt::cancel_only(&ctl), |reader| {
+            armed.store(true, Ordering::Relaxed);
+            read_seventeen(reader)
+        });
+        assert!(matches!(result, Err(IoError::Cancelled)));
+    }
 }

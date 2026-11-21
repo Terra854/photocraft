@@ -96,8 +96,8 @@ fn bzip2_and_xz_use_the_same_native_import_and_validate_complete_streams() {
             // The penultimate byte is in the combined-stream CRC, before any final pad bits.
             corrupt.len() - 2
         } else {
-            // Alter a literal sample in the uncompressed LZMA2 chunk, leaving XCF's signature.
-            12 + 12 + 3 + source.len() / 2
+            // Skip the Stream Header, Block Header, LZMA2 chunks and aligned padding.
+            (12 + 12 + 3 * source.len().div_ceil(65536) + source.len() + 1).next_multiple_of(4)
         };
         corrupt[at] ^= 1;
         assert!(photocraft_io::import(name, &corrupt).is_err(), "{name}: checksum corruption");

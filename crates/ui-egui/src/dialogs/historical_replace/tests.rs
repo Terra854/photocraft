@@ -653,3 +653,21 @@ fn edit_contents_prompts_for_a_legacy_embedded_xcf_and_keeps_the_choice() {
     assert_ne!(child.doc.id, parent);
     assert_eq!(child.doc.layers[0].surface().unwrap().pixel(0, 0)[0], f32::from(0x1234u16) / 65535.);
 }
+
+#[test]
+fn background_replacement_reports_completed_import_warnings() {
+    let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
+    let id = photocraft_engine::jobs::JobId(87);
+    app.historical_replacements.applying = Some(id);
+    let event = JobEvent {
+        id,
+        command: COMMAND.into(),
+        label: "Replace Contents".into(),
+        document: None,
+        outcome: JobOutcome::Done(json!({"warnings":["Saved layer appearance was approximated"]})),
+        error: None,
+    };
+    assert!(on_event(&mut app, &event));
+    assert!(app.ui.status.contains("Saved layer appearance was approximated"));
+    assert_eq!(app.ui.notices.last().unwrap().lines, ["Saved layer appearance was approximated"]);
+}

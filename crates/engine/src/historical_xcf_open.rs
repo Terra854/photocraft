@@ -5,13 +5,18 @@ use photocraft_doc::{DocId, LayerId};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+/// Holding a source for a choice is not a completed action that can be replayed.
+pub(super) fn is_pending_reply(value: &Value) -> bool {
+    value.get("heldHistoricalXcfPlace").is_some() || value.get("heldHistoricalXcfOpen").is_some()
+}
+
 const MAX_HELD: usize = 16;
-const MAX_HELD_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_HELD_BYTES: u64 = Session::MAX_PENDING_PREFLIGHT_BYTES;
 
 pub(super) struct Held {
     id: u64,
     name: String,
-    bytes: Arc<Vec<u8>>,
+    pub(super) bytes: Arc<Vec<u8>>,
     options: photocraft_io::ImportOptions,
     destination: Destination,
 }
@@ -63,12 +68,9 @@ fn hold_with_budget(
     question: photocraft_io::HistoricalXcfSampleOrderRequest,
     options: photocraft_io::ImportOptions,
     destination: Destination,
-    byte_budget: usize,
+    byte_budget: u64,
 ) -> Result<Value> {
-    // A truncated Vec still owns its allocation. Charging its length would let retained
-    // source capabilities exceed the pending-choice memory budget without changing the file.
-    let retained = s.jobs.historical_xcf.iter().try_fold(bytes.capacity(), |total, held| total.checked_add(held.bytes.capacity()));
-    if s.jobs.historical_xcf.len() >= MAX_HELD || retained.is_none_or(|total| total > byte_budget) {
+    if s.jobs.historical_xcf.len() >= MAX_HELD || s.pending_import_bytes_with(Some(&bytes))? > byte_budget {
         return Err(EngineError::Other("too many historical XCF sources await a sample-order choice; finish or cancel an earlier choice".into()));
     }
     let id = s.jobs.next_historical_xcf.checked_add(1).ok_or_else(|| EngineError::Other("historical source identity limit reached".into()))?;

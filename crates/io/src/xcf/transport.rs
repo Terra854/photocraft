@@ -221,6 +221,18 @@ pub(super) fn with_xcf_prefix<T>(name: &str, bytes: &[u8], ctl: &Interrupt<'_>, 
 }
 
 fn with_xcf_prefix_limit<T>(name: &str, bytes: &[u8], ctl: &Interrupt<'_>, limit: usize, scan: impl FnOnce(&mut dyn Read) -> Result<T>) -> Result<Option<T>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // A scanner can translate a Read error into a format error. Remember any
+    // cancellation that stopped a read, even if the caller's callback is an edge.
+    let observed = AtomicBool::new(false);
+    let cancel = || {
+        if !observed.load(Ordering::Relaxed) && ctl.cancelled() {
+            observed.store(true, Ordering::Relaxed);
+        }
+        observed.load(Ordering::Relaxed)
+    };
+    let progress = |fraction| ctl.progress(fraction);
+    let ctl = &Interrupt::new(&cancel, &progress);
     ctl.check().map_err(|_| IoError::Cancelled)?;
     if super::is_xcf(bytes) {
         let mut reader = bytes;
@@ -230,7 +242,9 @@ fn with_xcf_prefix_limit<T>(name: &str, bytes: &[u8], ctl: &Interrupt<'_>, limit
     }
     let Some(kind) = crate::import_compression(bytes) else { return Ok(None) };
     let mut input = Input { remaining: bytes, ctl: *ctl };
-    let strict = std::cell::Cell::new(true);
+    let allow_svg = kind == crate::ImportCompression::Gzip && name.to_ascii_lowercase().ends_with(".xcf");
+    // A short SVG can reach the gzip tail before the XCF magic buffer fills.
+    let strict = std::cell::Cell::new(!allow_svg);
     let mut decoder = compressed_reader(kind, &mut input, &strict);
     let mut magic = [0; MAGIC.len()];
     let mut filled = 0;
@@ -247,7 +261,7 @@ fn with_xcf_prefix_limit<T>(name: &str, bytes: &[u8], ctl: &Interrupt<'_>, limit
     }
     ctl.check().map_err(|_| IoError::Cancelled)?;
     if filled != magic.len() || magic != MAGIC {
-        if kind == crate::ImportCompression::Gzip && name.to_ascii_lowercase().ends_with(".xcf") {
+        if allow_svg {
             let mut prefix = magic.get(..filled).ok_or_else(|| invalid("invalid XCF prefix length"))?.to_vec();
             if probe_svg(decoder.as_mut(), &mut prefix, ctl, SVG_PROBE_BYTES)? {
                 return Ok(None);
@@ -259,6 +273,7 @@ fn with_xcf_prefix_limit<T>(name: &str, bytes: &[u8], ctl: &Interrupt<'_>, limit
             Ok(None)
         };
     }
+    strict.set(true);
     // Replay only the already-read magic, not another decoder. The scanner then
     // sees the same framing as an uncompressed XCF and pays for every byte once.
     let mut reader = magic.as_slice().chain(decoder);

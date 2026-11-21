@@ -334,7 +334,10 @@ fn coverage_inventory_exhaustion_at_each_work_stage_preserves_a_later_raster_and
     let owner = coverage_owner(&mut malformed);
     malformed.inventory_coverage_effects(owner, &[usize::MAX], &Interrupt::NONE).unwrap();
     let ImportConversion::Report(report) = malformed.outcomes.finish().unwrap() else { panic!("typed report") };
-    assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.coverage_effect" && entry.reason == ConversionReason::InvalidOptionalData));
+    let malformed = report.entries.iter().find(|entry| entry.feature_code == "xcf.coverage_effect").unwrap();
+    assert_eq!(malformed.reason, ConversionReason::InvalidOptionalData);
+    assert_eq!(malformed.disposition, ConversionDisposition::SkippedNonessential);
+    assert!(report.attachments.is_empty());
     let mut cancelled = image(&w.out, 0);
     let owner = coverage_owner(&mut cancelled);
     assert!(matches!(cancelled.inventory_coverage_effects(owner, &[parent], &Interrupt::cancel_only(&|| true)), Err(IoError::Cancelled)));
@@ -398,4 +401,16 @@ fn valid_effect_config_quota_is_retention_loss_not_malformed_and_keeps_later_ras
     let cancelled = Interrupt::cancel_only(&|| true);
     let mut cancelled_budget = MAX_METADATA_BYTES;
     assert!(matches!(effects::decode(&cursor, valid, 26, &mut cancelled_budget, &cancelled), Err(IoError::Cancelled)));
+}
+
+#[test]
+fn only_the_effective_item_path_consumes_metadata_budget() {
+    let path = |index| [1u32.to_be_bytes(), u32::to_be_bytes(index)].concat();
+    let mut writer = W { out: vec![0; 4], wide: true };
+    // The name's four bytes plus the eight-byte effective path fit exactly.
+    let offset = layer(&mut writer, "Name", &[(30, path(7)), (30, path(9))], 0);
+    let mut decoder = image(&writer.out, 12);
+    let (node, _) = decoder.layer(0, offset, PixelFormat::RGBA8, PixelFormat::GRAY8, &Interrupt::NONE).unwrap().unwrap();
+    assert_eq!(node.path, [1, 9]);
+    assert!(!node.path_omitted);
 }

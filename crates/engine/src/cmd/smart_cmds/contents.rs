@@ -71,7 +71,11 @@ fn read_relink_source(
     ctx.check()?;
     crate::jobs::authorize_render_command("layer.smartObjects.updateModifiedContent", &json!({"path":path}))?;
     let resolved = crate::doc_path::resolve(&path).map_err(|error| crate::doc_path::refusal("link", &path, error))?;
-    let bytes = photocraft_format::read_file(&resolved).map_err(|error| other(format!("can't read {path}: {error}")))?;
+    let bytes = photocraft_format::read_file(&resolved).map_err(|error| EngineError::LinkedSourceRead {
+        path: path.clone(),
+        kind: error.kind(),
+        message: error.to_string(),
+    })?;
     ctx.check()?;
     let verified = expected.map(|_| photocraft_io::linked::historical_xcf_digest(&bytes));
     if expected != verified {

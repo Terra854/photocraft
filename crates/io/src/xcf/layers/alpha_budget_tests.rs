@@ -157,7 +157,8 @@ fn opaque_and_alpha_layers_charge_expanded_samples_and_native_tiles_at_every_dep
                 let precision = Precision::from_header(11, code).unwrap();
                 let mut exact = image(&bytes, expanded_samples + tiles, base_type, precision);
                 let (node, _) = exact.layer(0, pointer, format, mask, &Interrupt::NONE).unwrap().unwrap();
-                assert_eq!(exact.budget, 0, "{mode:?}/{depth:?}, alpha={alpha}");
+                let released_scratch = if alpha { 0 } else { expanded_samples };
+                assert_eq!(exact.budget, released_scratch, "{mode:?}/{depth:?}, alpha={alpha}");
                 let actual = node.layer.surface().unwrap().read_region(Rect::new(0, 0, 1, 1));
                 assert_eq!(&actual[..color_channels], &expected[..color_channels]);
                 assert_eq!(actual[color_channels], 1.);
@@ -282,9 +283,10 @@ fn an_opaque_layer_fits_when_its_full_scratch_and_native_tiles_would_exceed_the_
     writer.patch(raster, at);
     let logical = width as usize * height as usize * 16;
     let bounded_scratch = TILE as usize * TILE as usize * 16;
-    let mut decoder = image(&writer.out, logical + bounded_scratch, 0, Precision::GAMMA8);
+    let mut decoder = image(&writer.out, 2 * logical + bounded_scratch, 0, Precision::GAMMA8);
     let (node, _) = decoder.layer(0, layer, PixelFormat::RGBA8, PixelFormat::GRAY8, &Interrupt::NONE).unwrap().unwrap();
-    assert_eq!(decoder.budget, 0);
+    decoder.layer(1, layer, PixelFormat::RGBA8, PixelFormat::GRAY8, &Interrupt::NONE).unwrap().unwrap();
+    assert_eq!(decoder.budget, bounded_scratch, "both layers reuse the allowance for one live tile");
     let surface = node.layer.surface().unwrap();
     for (x, y) in [(0, 0), (63, 63), (64, 64), (255, 200), (511, 255)] {
         assert_eq!(surface.pixel(x - 17, y + 19), [x as u8 as f32 / 255., y as u8 as f32 / 255., 57. / 255., 1.]);

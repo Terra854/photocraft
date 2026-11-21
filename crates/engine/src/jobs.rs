@@ -1095,7 +1095,7 @@ impl Session {
     /// This is a retention bound for the *sources* of files waiting for an answer, not a pixel
     /// budget and not an admission limit: only an [`OpenSource::Bytes`] source holds data (a path
     /// streams from its file once opened), the allocation's capacity is charged rather than its
-    /// contents, and one shared buffer counts once however many preflights refer to it. 1 GiB is
+    /// contents, and one shared buffer counts once across PSD preflights and historical XCF choices. 1 GiB is
     /// chosen conservatively: it is below the 2 GiB web hard
     /// product cap, so even a web session that queues several large dropped files cannot spend
     /// the whole hard budget on data it has not decoded, and a native session keeps a comparable
@@ -1119,7 +1119,11 @@ impl Session {
         if self.pending_preflights.len() >= Self::MAX_PENDING_PREFLIGHTS {
             return Err(EngineError::Other("too many pending high-memory preflights waiting for confirmation".into()));
         }
-        let held = self.pending_preflight_bytes_with(&preflight.source)?;
+        let incoming = match &preflight.source {
+            OpenSource::Bytes(bytes) => Some(bytes),
+            _ => None,
+        };
+        let held = self.pending_import_bytes_with(incoming)?;
         if held > byte_limit {
             return Err(EngineError::Other(format!(
                 "too much memory is already held by files waiting for a memory approval ({held} bytes, limit {byte_limit}); answer or cancel one of them and try again"
@@ -1140,26 +1144,29 @@ impl Session {
     /// them once. Computed from the queue, so approving, cancelling, refusing or clearing always
     /// releases the charge; a rejected preflight never adds one.
     pub fn pending_preflight_bytes(&self) -> Result<u64> {
-        Self::retained_source_bytes(self.pending_preflights.iter().map(|p| &p.source))
+        Self::retained_source_bytes(self.preflight_sources())
     }
 
-    /// [`Self::pending_preflight_bytes`] as if `incoming` were queued too, so accepting it can be
-    /// checked before the list is changed.
-    fn pending_preflight_bytes_with(&self, incoming: &OpenSource) -> Result<u64> {
-        let mut sources: Vec<&OpenSource> = self.pending_preflights.iter().map(|p| &p.source).collect();
-        sources.push(incoming);
-        Self::retained_source_bytes(sources)
+    fn preflight_sources(&self) -> impl Iterator<Item = &Arc<Vec<u8>>> {
+        self.pending_preflights.iter().filter_map(|p| match &p.source {
+            OpenSource::Bytes(bytes) => Some(bytes),
+            _ => None,
+        })
+    }
+
+    /// Count shared source allocations only once across both confirmation queues.
+    fn pending_import_bytes_with(&self, incoming: Option<&Arc<Vec<u8>>>) -> Result<u64> {
+        Self::retained_source_bytes(self.preflight_sources().chain(self.jobs.historical_xcf.iter().map(|held| &held.bytes)).chain(incoming))
     }
 
     /// Total retained capacity of distinct in-memory sources, counting a shared buffer once.
     ///
     /// Capacity, not length, is charged because a truncated `Vec` keeps its allocation; overflow
     /// is an error rather than a wrapped total.
-    fn retained_source_bytes<'a>(sources: impl IntoIterator<Item = &'a OpenSource>) -> Result<u64> {
+    fn retained_source_bytes<'a>(sources: impl IntoIterator<Item = &'a Arc<Vec<u8>>>) -> Result<u64> {
         let mut seen: Vec<usize> = Vec::new();
         let mut total: u64 = 0;
-        for source in sources {
-            let OpenSource::Bytes(bytes) = source else { continue };
+        for bytes in sources {
             let identity = Arc::as_ptr(bytes) as usize;
             // Distinct live allocations cannot share an address, so identity dedupes clones of
             // one buffer without under-counting two different files with equal contents.
@@ -1282,7 +1289,8 @@ impl Session {
         let mut opts = options.unwrap_or_else(|| import_options(self.prefs()));
         // An interactive raw open keeps its sensor data for the Camera Raw dialog it may show.
         opts.keep_raw |= confirm_damage && self.prefs().raw_defaults.open_in_camera_raw;
-        // A nominally inline interactive open must not probe compressed envelopes on the UI thread.
+        // Request a worker for interactive compressed opens on desktop. The browser
+        // still runs this non-stepped import inline.
         let background = background || (confirm_damage && matches!(&source, OpenSource::Bytes(bytes) if has_compressed_import_signature(bytes)));
         let test_memory_scope = photocraft_io::memory::TestMemoryScope::capture();
         enum WorkResult {
@@ -1949,7 +1957,7 @@ impl Session {
                         st.fx_collapsed.push(layer_id);
                     }
                 }
-                let journal = spec.journal && v.get("heldHistoricalXcfPlace").is_none();
+                let journal = spec.journal && !historical_xcf_open::is_pending_reply(&v);
                 self.after_command(id, params, journal, automation, Some(nested_from), pre_selected.as_deref(), &record_before);
                 Ok(Started::Done(v))
             }
@@ -2213,7 +2221,7 @@ impl Session {
             // polling it now, and only for the recording that owns it: a foreign recording does
             // not get the step.
             // A held placement has not inserted a layer. Replaying this incomplete command would pause again.
-            let journal = *journal && r.as_ref().is_ok_and(|value| value.get("heldHistoricalXcfPlace").is_none());
+            let journal = *journal && r.as_ref().is_ok_and(|value| !historical_xcf_open::is_pending_reply(value));
             self.after_command(command, params.clone(), journal, *automation && !foreign, Some(nested_from), pre_selected.as_deref(), before);
             if foreign && let Some((start, _)) = self.actions.recording.as_mut() {
                 *start = self.journal.len();

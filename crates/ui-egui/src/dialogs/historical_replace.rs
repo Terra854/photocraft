@@ -277,9 +277,10 @@ pub(crate) fn on_event(app: &mut PhotocraftApp, event: &JobEvent) -> bool {
         app.historical_replacements.applying = None;
         app.sync_views();
         match &event.outcome {
-            JobOutcome::Done(_) => {
+            JobOutcome::Done(result) => {
                 app.ui.status = event.label.clone();
                 app.ui.status_error = false;
+                crate::notices::io_result_warnings(app, result, &event.label);
             }
             JobOutcome::Failed(error) => super::alerts::report_error(app, error.clone()),
             JobOutcome::Cancelled => {

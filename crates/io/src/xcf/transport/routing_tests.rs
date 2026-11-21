@@ -387,3 +387,19 @@ fn xz_validates_optional_block_sizes_independently_of_the_index() {
         assert!(matches!(crate::import("sizes.xcf.xz", &wrapped), Err(IoError::Xcf(error)) if error.contains("XZ Block Header") && error.contains(message)));
     }
 }
+
+#[test]
+fn xz_header_filter_identifiers_and_sizes_require_canonical_vlis() {
+    use photocraft_testkit::xcf::xz;
+    let source = [MAGIC, &[0; 64]].concat();
+    let valid = xz(&source);
+    assert!(decode_import("source.xcf.xz", &valid, &Interrupt::NONE, false).unwrap().is_some());
+    for filter in [[0xa1, 0, 1, 0], [0x21, 0x81, 0, 0]] {
+        let mut invalid = valid.clone();
+        invalid[14..18].copy_from_slice(&filter);
+        let crc = crc32fast::hash(&invalid[12..20]).to_le_bytes();
+        invalid[20..24].copy_from_slice(&crc);
+        let Err(error) = decode_import("source.xcf.xz", &invalid, &Interrupt::NONE, false) else { panic!("noncanonical filter integer") };
+        assert!(error.to_string().contains("noncanonical XZ variable-length integer"), "{error}");
+    }
+}

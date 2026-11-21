@@ -1724,3 +1724,58 @@ fn profile_compositing_on_linear_samples_is_reported_as_an_approximation() {
         assert_eq!(report.entries.iter().any(|e| e.feature_code == "xcf.compositing_space" && e.reason == ConversionReason::NativeLimitation), requested == 2);
     }
 }
+
+#[test]
+fn a_recovered_group_does_not_renumber_explicit_source_parents() {
+    let path = |parts: &[u32]| (30, parts.iter().copied().flat_map(u32::to_be_bytes).collect());
+    let mut recovered = TestLayer::rgba("Recovered group", 1, 1, Vec::new());
+    recovered.props = vec![(29, Vec::new()), (30, vec![0])];
+    let mut group = TestLayer::rgba("Explicit group", 1, 1, Vec::new());
+    group.props = vec![(29, Vec::new()), path(&[1])];
+    let mut nested = TestLayer::rgba("Explicit nested group", 1, 1, Vec::new());
+    nested.props = vec![(29, Vec::new()), path(&[1, 3])];
+    let mut child = TestLayer::rgba("Child", 1, 1, vec![17, 31, 57, 255]);
+    child.props.push(path(&[1, 3, 0]));
+    let mut image = TestImage::rgb8(1, 1);
+    image.layers.extend([recovered, group, nested, child]);
+
+    let document = open(&image.write()).unwrap().document;
+    assert_eq!(document.layers.len(), 2);
+    assert!(layer_at(&document.layers, "Recovered group").children().unwrap().is_empty());
+    let group = layer_at(&document.layers, "Explicit group");
+    let nested = layer_at(group.children().unwrap(), "Explicit nested group");
+    assert_eq!(nested.children().unwrap()[0].name, "Child");
+}
+
+#[test]
+fn an_invalid_float_opacity_preserves_the_byte_value_and_source_record() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    let mut image = TestImage::rgb8(1, 1);
+    let mut layer = TestLayer::rgba("Opaque", 1, 1, vec![17, 31, 57, 255]);
+    layer.props.push((33, (-0.25f32).to_be_bytes().to_vec()));
+    image.layers.push(layer);
+    let imported = open(&image.write()).unwrap();
+    assert_eq!(imported.document.layers[0].opacity, 1.0);
+    let Some(ImportConversion::Report(report)) = imported.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.source_property.33" && entry.reason == ConversionReason::InvalidOptionalData));
+    assert!(report.attachments.iter().any(|attachment| attachment.bytes.as_slice() == (-0.25f32).to_be_bytes()));
+}
+
+#[test]
+fn distinguishes_perceptual_rgb_from_lab_for_both_compositing_space_signs() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    for requested in [-4i32, -3, 3, 4] {
+        let mut image = TestImage::rgb8(1, 1);
+        image.version = 26;
+        image.precision = 175;
+        let mut layer = TestLayer::rgba("Perceptual", 1, 1, vec![17, 31, 57, 255]);
+        layer.props.push((36, requested.to_be_bytes().to_vec()));
+        image.layers.push(layer);
+        let imported = open(&image.write()).unwrap();
+        let Some(ImportConversion::Report(report)) = imported.document.metadata.import_conversion.as_deref() else { panic!("report") };
+        assert_eq!(
+            report.entries.iter().any(|entry| entry.feature_code == "xcf.compositing_space" && entry.reason == ConversionReason::NativeLimitation),
+            requested.unsigned_abs() == 3
+        );
+    }
+}

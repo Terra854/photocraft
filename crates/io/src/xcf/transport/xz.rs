@@ -41,6 +41,11 @@ fn block_record(input: &mut &[u8], header_size: usize, check_size: usize, ctl: &
     let mut sizes = header.get(2..header_size.saturating_sub(4)).ok_or_else(|| invalid("truncated XZ Block Header"))?;
     let declared_compressed = (flags & 0x40 != 0).then(|| vli(&mut sizes)).transpose()?;
     let declared_uncompressed = (flags & 0x80 != 0).then(|| vli(&mut sizes)).transpose()?;
+    for _ in 0..=(flags & 0x03) {
+        vli(&mut sizes)?; // Filter ID.
+        let size = usize::try_from(vli(&mut sizes)?).map_err(|_| invalid("XZ Filter Properties size overflows"))?;
+        take(&mut sizes, size)?;
+    }
     let start = input.len();
     let mut uncompressed = 0u64;
     loop {
