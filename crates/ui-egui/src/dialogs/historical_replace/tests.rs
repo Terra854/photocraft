@@ -563,12 +563,13 @@ fn desktop_place_and_open_as_smart_object_resume_the_picked_historical_source() 
         confirm(&mut app, dialog.id).unwrap();
         let active = app.session.active().unwrap();
         let LayerContent::Smart(placed) = &active.doc.layer(active.active_layer.unwrap()).unwrap().content else { panic!("placed source") };
-        match &placed.source {
-            SmartSource::Embedded { bytes, .. } => assert_eq!(bytes.as_slice(), original, "{command}"),
-            SmartSource::Linked { path: linked } => {
+        match (command, &placed.source) {
+            ("file.placeLinked", SmartSource::Linked { path: linked }) => {
                 assert_eq!(std::path::Path::new(linked), path);
                 assert_eq!(placed.historical_xcf_link_digest, Some(photocraft_io::linked::historical_xcf_digest(&original)));
             }
+            ("file.placeEmbedded" | "file.openAsSmartObject", SmartSource::Embedded { bytes, .. }) => assert_eq!(bytes.as_slice(), original, "{command}"),
+            (_, source) => panic!("unexpected source for {command}: {source:?}"),
         }
         assert_eq!(placed.historical_xcf_sample_order, Some(HistoricalXcfSampleOrder::LittleEndian), "{command}");
         assert_eq!(placed.cache.as_ref().unwrap().pixel(0, 0), [0x1234 as f32 / 65535., 0x4567 as f32 / 65535., 0x89ab as f32 / 65535., 1.], "{command}");
@@ -670,4 +671,62 @@ fn background_replacement_reports_completed_import_warnings() {
     assert!(on_event(&mut app, &event));
     assert!(app.ui.status.contains("Saved layer appearance was approximated"));
     assert_eq!(app.ui.notices.last().unwrap().lines, ["Saved layer appearance was approximated"]);
+}
+
+#[test]
+fn picked_replacement_respects_the_automation_command_gate_before_mutation() {
+    for background in [false, true] {
+        let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
+        app.background_jobs = background;
+        app.automation_input = true;
+        app.services.automation_command = Some(Box::new(|id, params| {
+            assert_eq!(id, COMMAND);
+            assert!(params["layer"].is_u64());
+            Err("replacement denied by automation policy".into())
+        }));
+        let target = target_in(app.session.active().unwrap(), app.session.active().unwrap().active_layer.unwrap()).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        let err = apply_source(
+            &mut app,
+            Action::Replace(target),
+            "picked.xcf",
+            Some(Arc::new(fixture::historical_pixel(true))),
+            Some(HistoricalXcfSampleOrder::LittleEndian),
+        )
+        .unwrap_err();
+        assert_eq!(err, "replacement denied by automation policy");
+        assert!(Arc::ptr_eq(&app.session.active().unwrap().doc, &before));
+        assert!(app.session.jobs().is_empty());
+    }
+}
+
+#[test]
+fn inline_replacement_shows_the_warning_for_retained_unsupported_filters() {
+    let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
+    let layer = app.session.active().unwrap().active_layer.unwrap();
+    app.session
+        .edit("Fixture filter", |doc, _| {
+            let LayerContent::Smart(smart) = &mut doc.layer_mut(layer).unwrap().content else { panic!("smart object") };
+            smart.smart_filters.push(photocraft_doc::SmartFilter {
+                command: "filter.fixture.unavailable".into(),
+                params: json!({"name":"Unavailable fixture filter"}),
+                blend: photocraft_doc::BlendMode::Normal,
+                opacity: 1.0,
+                visible: true,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let target = target_in(app.session.active().unwrap(), layer).unwrap();
+    let result = apply_source(
+        &mut app,
+        Action::Replace(target),
+        "picked.xcf",
+        Some(Arc::new(fixture::historical_pixel(true))),
+        Some(HistoricalXcfSampleOrder::LittleEndian),
+    )
+    .unwrap();
+    let warning = result["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("Unavailable fixture filter"));
+    assert!(app.ui.notices.iter().any(|notice| notice.lines.iter().any(|line| line == warning)));
 }

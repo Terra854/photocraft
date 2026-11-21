@@ -122,3 +122,20 @@ fn a_warm_svgz_cache_does_not_admit_the_same_bytes_under_a_declared_xcf_alias() 
     smart.source = photocraft_doc::SmartSource::Embedded { file_name: "art.xcf.gz".into(), bytes };
     assert!(crate::smart_cmds::render(doc, &smart).is_err());
 }
+
+#[test]
+fn a_declared_svgz_with_a_long_prolog_uses_the_same_placement_cache() {
+    let short = gzip(SVG);
+    let long = gzip(&[vec![b' '; 16_384].as_slice(), SVG].concat());
+    let params = json!({"smartObject": true, "fit": false, "scale": 175, "center": [8, 8]});
+    for depth in [8, 16, 32] {
+        let mut reference = session(depth);
+        let mut actual = session(depth);
+        let short = super::place_bytes(&mut reference, "reference.svgz", short.clone(), None, &params).unwrap();
+        let long = super::place_bytes(&mut actual, "long.svgz", long.clone(), None, &params).unwrap();
+        let short = smart(&reference, &short);
+        let long = smart(&actual, &long);
+        assert_eq!(short.transform, long.transform);
+        assert_eq!(short.cache, long.cache, "SVGZ cache at {depth}-bit");
+    }
+}

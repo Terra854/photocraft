@@ -31,8 +31,7 @@ pub(crate) fn decode_import(name: &str, bytes: &[u8], ctl: &Interrupt<'_>, allow
 /// Recognize SVG inside a gzip envelope without inflating its remaining drawing.
 /// This is a cancellable worker probe, not a complete SVG or envelope validation.
 pub(crate) fn svg_prefix(name: &str, bytes: &[u8], ctl: &Interrupt<'_>) -> Result<Option<Vec<u8>>> {
-    decode_stream(name, bytes, ctl, SVG_PROBE_BYTES, true, true)
-        .map(|decoded| decoded.filter(|decoded| !decoded.is_xcf && svg_signature(&decoded.bytes)).map(|decoded| decoded.bytes))
+    decode_stream(name, bytes, ctl, SVG_PROBE_BYTES, true, true).map(|decoded| decoded.filter(|decoded| !decoded.is_xcf).map(|decoded| decoded.bytes))
 }
 
 mod bzip;

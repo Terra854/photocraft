@@ -977,6 +977,8 @@ pub fn has_compressed_import_signature(bytes: &[u8]) -> bool {
 /// The command id open jobs report (there is no engine command: opening is the shell's).
 pub const OPEN_JOB: &str = "file.open";
 
+type RetainedOpen = Box<dyn FnOnce(&mut Session) -> Result<Value>>;
+
 /// The import settings files are opened and placed with.
 pub fn import_options(prefs: &crate::prefs::Preferences) -> photocraft_io::ImportOptions {
     photocraft_io::ImportOptions {
@@ -1289,9 +1291,6 @@ impl Session {
         let mut opts = options.unwrap_or_else(|| import_options(self.prefs()));
         // An interactive raw open keeps its sensor data for the Camera Raw dialog it may show.
         opts.keep_raw |= confirm_damage && self.prefs().raw_defaults.open_in_camera_raw;
-        // Request a worker for interactive compressed opens on desktop. The browser
-        // still runs this non-stepped import inline.
-        let background = background || (confirm_damage && matches!(&source, OpenSource::Bytes(bytes) if has_compressed_import_signature(bytes)));
         let test_memory_scope = photocraft_io::memory::TestMemoryScope::capture();
         enum WorkResult {
             Decoded(Box<(photocraft_io::ImportResult, bool)>),
@@ -1776,6 +1775,10 @@ impl Session {
 
     /// Run the command `id`: inline, or (with `background`) as a job when it is one.
     pub(crate) fn dispatch(&mut self, id: &str, params: Value, background: bool) -> Result<Started> {
+        self.dispatch_with_source(id, params, background, None)
+    }
+
+    fn dispatch_with_source(&mut self, id: &str, params: Value, background: bool, retained_open: Option<RetainedOpen>) -> Result<Started> {
         // The offer belongs to this one dispatch. Early errors drop it locally, including
         // authorization, validation, floating-selection and admission failures.
         let live_commit = self.live_commit.take();
@@ -1791,7 +1794,7 @@ impl Session {
         } else {
             None
         };
-        let result = self.dispatch_with_commit(id, params, background, live_commit);
+        let result = self.dispatch_with_commit(id, params, background, live_commit, retained_open);
         if result.is_err()
             && let Some((index, state, action_history)) = checkpoint
             && self.docs.get(index).is_some_and(|current| current.doc.id == state.doc.id)
@@ -1802,7 +1805,25 @@ impl Session {
         result
     }
 
-    fn dispatch_with_commit(&mut self, id: &str, params: Value, background: bool, live_commit: Option<crate::brush_cmds::LiveCommit>) -> Result<Started> {
+    /// Run a dispatched open from its retained picker bytes, with the usual journal and action recording.
+    pub(crate) fn dispatch_retained_open(
+        &mut self,
+        id: &str,
+        params: Value,
+        background: bool,
+        run: impl FnOnce(&mut Session) -> Result<Value> + 'static,
+    ) -> Result<Started> {
+        self.dispatch_with_source(id, params, background, Some(Box::new(run)))
+    }
+
+    fn dispatch_with_commit(
+        &mut self,
+        id: &str,
+        params: Value,
+        background: bool,
+        live_commit: Option<crate::brush_cmds::LiveCommit>,
+        retained_open: Option<RetainedOpen>,
+    ) -> Result<Started> {
         let spec = crate::registry::spec(id)?;
         // Params are named fields: anything but an object (or null, meaning none) is a caller
         // mistake, not "use every default".
@@ -1895,8 +1916,11 @@ impl Session {
         // error instead of taking the app down. `edit` only commits a document after its closure
         // returns, so the documents are unchanged.
         self.live_commit = live_commit.filter(|live| live.cmd == id);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, &run_params)))
-            .unwrap_or_else(|_| Err(EngineError::Other(format!("`{id}` failed with an internal error (logged); the document is unchanged"))));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match retained_open {
+            Some(run) => run(self),
+            None => (spec.run)(self, &run_params),
+        }))
+        .unwrap_or_else(|_| Err(EngineError::Other(format!("`{id}` failed with an internal error (logged); the document is unchanged"))));
         self.live_commit = None;
         if self.actions.recording.is_none() {
             self.actions.recording = recording;

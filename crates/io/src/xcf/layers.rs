@@ -824,6 +824,8 @@ impl<'a> Image<'a> {
         self.layer_identity_notices(outcome, &lprops, floating, gray_floating, legacy_linked)?;
         if link {
             self.layer_link(outcome, &lprops, hptr, ctl)?;
+        } else if !group && hptr == 0 {
+            return Err(invalid(format!("layer '{name}' is missing its pixel hierarchy")));
         }
         self.layer_compositing(&layer, outcome, layer_mode, group, composite_mode)?;
         let linear = composite_space.unsigned_abs() == 1 || blend_space.unsigned_abs() == 1;

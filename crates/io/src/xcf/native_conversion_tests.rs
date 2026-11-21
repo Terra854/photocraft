@@ -1,4 +1,4 @@
-use super::tests::{TestImage, TestLayer};
+use super::tests::{TestImage, TestLayer, W, hierarchy};
 use super::*;
 
 fn parasite(name: &str, data: &[u8]) -> Vec<u8> {
@@ -66,7 +66,7 @@ fn image(bytes: &[u8]) -> Image<'_> {
     super::tests::decoder_image(bytes)
 }
 
-fn vector_layer(encoding: &str) -> Vec<u8> {
+fn vector_layer(encoding: &str, rgba: [u8; 4]) -> Vec<u8> {
     fn word(bytes: &mut Vec<u8>, value: u32) {
         bytes.extend_from_slice(&value.to_be_bytes());
     }
@@ -99,13 +99,19 @@ fn vector_layer(encoding: &str) -> Vec<u8> {
     word(&mut bytes, 47);
     word(&mut bytes, style.len() as u32);
     bytes.extend_from_slice(&style);
-    bytes.extend_from_slice(&[0; 32]); // End properties, no hierarchy/mask/effects.
-    bytes
+    let mut writer = W { out: bytes, wide: true };
+    writer.end();
+    let raster = writer.slot();
+    writer.ptr(0); // No layer mask.
+    writer.ptr(0); // No stored effects.
+    let at = hierarchy(&mut writer, 1, 1, 4, &rgba, Compression::None);
+    writer.patch(raster, at);
+    writer.out
 }
 
 #[test]
 fn repeated_vector_offsets_charge_bounded_pending_diagnostics() {
-    let bytes = vector_layer("R'G'B'A u8");
+    let bytes = vector_layer("R'G'B'A u8", [0; 4]);
     let mut image = image(&bytes);
     let (layers, _) =
         image.import_layers(&vec![1; 1024], PixelFormat::RGBA8, PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false), &Interrupt::NONE).unwrap();
@@ -184,14 +190,11 @@ fn editable_perceptual_text_matches_saved_raster_before_and_after_native_reopen(
 
 #[test]
 fn unavailable_native_vector_colors_preserve_the_saved_raster() {
-    let bytes = vector_layer("R'G'B'A u8");
+    let bytes = vector_layer("R'G'B'A u8", [255, 0, 0, 255]);
     let mut image = image(&bytes);
     let (layers, _) = image.import_layers(&[1], PixelFormat::RGBA8, PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false), &Interrupt::NONE).unwrap();
     let mut document = Document::new("Vector", Size::new(1, 1), ColorMode::Rgb, SampleType::U8);
     document.layers = layers.into();
-    if let LayerContent::Raster(pixels) = &mut document.layers[0].content {
-        pixels.write_region(Rect::new(0, 0, 1, 1), &[1., 0., 0., 1.]);
-    }
     document.paths.push(photocraft_doc::vector::NamedPath { name: "Saved".into(), path: Default::default(), psd_raw: None });
     image.path_tattoos.insert(7, Some(PathBinding { index: 0, geometry_complete: true }));
     image.native_color_error = Some("profile has no native reverse transform".into());
@@ -260,7 +263,7 @@ fn undecodable_text_and_vector_paint_keep_the_saved_nonblack_appearance() {
     }
     config.extend_from_slice(br#"" 0))"#);
     text.props.push((21, parasite("gimp-text-layer", &config)));
-    let vector_wire = vector_layer("R'G'B'A float");
+    let vector_wire = vector_layer("R'G'B'A float", [0; 4]);
     let mut cursor = Cursor { b: &vector_wire, pos: 13, wide: true };
     cursor.string_bytes().unwrap();
     let properties = props(&mut cursor).unwrap();

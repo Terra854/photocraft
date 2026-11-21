@@ -368,6 +368,12 @@ fn wrapped_historical_sources_require_choice_and_decode_to_independent_native_sa
     let mut selection = Surface::new(scalar);
     selection.write_region(expected.bounds(), &selection_values);
     expected.selection = Some(selection);
+    let assert_planes = |document: &Document, name: &str| {
+        assert!(document.layers[0].surface() == expected.layers[0].surface(), "{name}: complete native raster");
+        assert!(document.layers[0].mask.as_ref().unwrap().surface == expected.layers[0].mask.as_ref().unwrap().surface, "{name}: complete native mask");
+        assert!(document.channels[0].surface == expected.channels[0].surface, "{name}: complete native channel");
+        assert!(document.selection == expected.selection, "{name}: complete native selection");
+    };
     for (name, wrapped) in wrappers {
         let request = photocraft_io::historical_xcf_sample_order_request(name, &wrapped).unwrap().unwrap();
         assert_eq!((request.version, request.bits_per_sample), (9, 32), "{name}");
@@ -378,13 +384,10 @@ fn wrapped_historical_sources_require_choice_and_decode_to_independent_native_sa
         let result = photocraft_io::import_with_options(name, &wrapped, &opts(Order::LittleEndian)).unwrap();
         assert!(result.source_read_only && !result.preview_only, "{name}");
         assert_pixels(&result.document, Sample::Float, false);
-        assert!(result.document.layers[0].surface() == expected.layers[0].surface(), "{name}: complete native raster");
-        assert!(result.document.layers[0].mask.as_ref().unwrap().surface == expected.layers[0].mask.as_ref().unwrap().surface, "{name}: complete native mask");
-        assert!(result.document.channels[0].surface == expected.channels[0].surface, "{name}: complete native channel");
-        assert!(result.document.selection == expected.selection, "{name}: complete native selection");
+        assert_planes(&result.document, name);
         let saved = photocraft_format::save_to_bytes(&result.document, &Default::default()).unwrap();
         let reopened = photocraft_format::load_from_bytes(&saved).unwrap();
-        assert!(reopened.layers[0].surface() == expected.layers[0].surface(), "{name}: native persistence");
+        assert_planes(&reopened, name);
         assert!(reopened.metadata.import_conversion == result.document.metadata.import_conversion, "{name}: choice report persistence");
     }
 }

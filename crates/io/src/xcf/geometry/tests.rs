@@ -275,3 +275,25 @@ fn psd_export_uses_wrapped_modern_xcf_geometry_without_a_sample_order() {
         assert_eq!(crate::smart_map::stored_size(&placed.descriptor), Some((317., 193.)), "{name}");
     }
 }
+
+#[test]
+fn competing_palette_prefixes_stop_before_the_unread_gzip_tail() {
+    use super::super::tests::{TestImage, TestLayer};
+    for property_count in [0, 80] {
+        let mut image = TestImage::rgb8(1, 1);
+        image.version = 26;
+        image.image_props.push((1, vec![0, 0, 0, 1, 255, 0, 0]));
+        image.image_props.push(dpi(240., 240.));
+        image.image_props.extend((0..property_count).map(|_| (50, vec![0; 1024])));
+        image.layers.push(TestLayer::rgba("Raster", 1, 1, vec![17, 31, 57, 255]));
+        let mut bytes = image.write();
+        let marker = [1u32.to_be_bytes(), 7u32.to_be_bytes(), [0, 0, 0, 1]].concat();
+        let offset = bytes.windows(marker.len()).position(|window| window == marker).unwrap();
+        bytes[offset + 4..offset + 8].copy_from_slice(&5u32.to_be_bytes());
+        assert_eq!(crate::import("palette.xcf", &bytes).unwrap().document.resolution_dpi, 240.);
+        let (name, mut gzip) = wrappers(&bytes).remove(0);
+        gzip.extend_from_slice(b"invalid gzip tail");
+        assert_eq!(source_geometry(name, &gzip, &Interrupt::NONE).unwrap(), Some(((1., 1.), 240.)));
+        assert!(crate::import(name, &gzip).is_err());
+    }
+}

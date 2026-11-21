@@ -76,7 +76,10 @@ fn duplicate_terminated_effect_lists_preserve_raster_mask_channel_and_native_pix
     let Some(ImportConversion::Report(report)) = document.metadata.import_conversion.as_deref() else { panic!("report") };
     let lists: Vec<_> = report.entries.iter().filter(|entry| entry.feature_code == "xcf.effect_list").collect();
     assert_eq!(lists.len(), 3);
-    assert!(lists.iter().all(|entry| entry.reason == ConversionReason::InvalidOptionalData && entry.source_description.contains("repeated")));
+    assert!(lists.iter().all(|entry| entry.reason == ConversionReason::InvalidOptionalData
+        && entry.disposition == ConversionDisposition::SkippedNonessential
+        && entry.attachments.is_empty()
+        && entry.source_description.contains("repeated")));
     assert_eq!(lists.iter().filter_map(|entry| entry.source.record_offset).collect::<std::collections::HashSet<_>>().len(), 3);
     assert!(!report.entries.iter().any(|entry| entry.reason == ConversionReason::RetentionLimit));
 }

@@ -51,6 +51,16 @@ impl PhotocraftApp {
         result
     }
 
+    /// Check the shell policy for a command, including picker results with opaque source bytes.
+    pub(crate) fn check_automation_command(&self, id: &str, params: &Value) -> Result<(), String> {
+        if self.automation_input
+            && let Some(authorize) = self.services.automation_command.as_ref()
+        {
+            authorize(id, params)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn run_command(&mut self, id: &str, params: Value) -> Result<Value, String> {
         self.run_depth += 1;
         let r = self.run_command_at_depth(id, params);
@@ -69,11 +79,7 @@ impl PhotocraftApp {
             self.ui.symmetry_transform = None;
         }
         let clip_read = std::mem::take(&mut self.clip_read_for_paste);
-        if self.automation_input
-            && let Some(authorize) = self.services.automation_command.as_ref()
-        {
-            authorize(id, &params)?;
-        }
+        self.check_automation_command(id, &params)?;
         // A new layer while Free Transform is open applies the transform first, as Photoshop does
         // (#5667): History reads the transform (or Place Embedded), then New Layer. Only for a
         // command that can run; a transform refused or still being applied keeps the box open and

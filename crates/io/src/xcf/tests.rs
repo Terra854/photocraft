@@ -131,7 +131,25 @@ fn unknown_standalone_path_does_not_hide_later_paths_or_pixels() {
     let paths: Vec<_> = report.entries.iter().filter(|entry| entry.feature_code == "xcf.path").collect();
     assert_eq!(paths.len(), 2);
     assert_eq!((paths[0].source.ordinal, paths[1].source.ordinal), (0, 1));
+    assert_eq!(paths[0].disposition, ConversionDisposition::RetainedUnapplied);
     assert!(report.attachments.iter().any(|attachment| attachment.owner.name == "Future path"));
+    let mut path_pointer = Cursor { b: &w.out, pos: unknown, wide: true };
+    let path_at = path_pointer.ptr().unwrap();
+    let mut header = path_pointer.at(path_at);
+    header.string_bytes().unwrap();
+    let size = header.pos;
+    let mut unframed = w.out.clone();
+    unframed[size..size + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    let recovered = open(&unframed).unwrap();
+    assert_eq!(pixel(&recovered.document.layers[0], 0, 0), pixel(&result.document.layers[0], 0, 0));
+    let Some(ImportConversion::Report(omissions)) = recovered.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    assert!(
+        omissions
+            .entries
+            .iter()
+            .any(|entry| entry.feature_code == "xcf.path" && entry.source.ordinal == 0 && entry.disposition == ConversionDisposition::SkippedNonessential)
+    );
+    assert!(!omissions.attachments.iter().any(|attachment| attachment.owner.name == "Future path"));
     let native = photocraft_format::save_to_bytes(&result.document, &Default::default()).unwrap();
     let reopened = photocraft_format::load_from_bytes(&native).unwrap();
     assert_eq!(reopened.paths, result.document.paths);
@@ -1777,5 +1795,41 @@ fn distinguishes_perceptual_rgb_from_lab_for_both_compositing_space_signs() {
             report.entries.iter().any(|entry| entry.feature_code == "xcf.compositing_space" && entry.reason == ConversionReason::NativeLimitation),
             requested.unsigned_abs() == 3
         );
+    }
+}
+
+#[test]
+fn a_link_missing_height_keeps_the_real_property_end_and_saved_pixels() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    let mut payload = W { out: Vec::new(), wide: true };
+    payload.u32(0);
+    payload.string("x");
+    payload.u32(17);
+    assert_eq!(payload.out.len(), 14);
+    let mut image = TestImage::rgb8(1, 1);
+    image.version = 26;
+    let mut layer = TestLayer::rgba("Linked", 1, 1, vec![51, 102, 153, 255]);
+    layer.props.push((48, payload.out));
+    image.layers.push(layer);
+    let result = open(&image.write()).unwrap();
+    assert_eq!(pixel(&result.document.layers[0], 0, 0), [0.2, 0.4, 0.6, 1.0]);
+    let Some(ImportConversion::Report(report)) = result.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.link_layer" && entry.reason == ConversionReason::InvalidOptionalData));
+}
+
+#[test]
+fn a_missing_hierarchy_is_only_allowed_for_groups_and_links() {
+    for (property, expected) in [(None, false), (Some((29, Vec::new())), true), (Some((48, vec![0; 16])), true)] {
+        let mut image = TestImage::rgb8(1, 1);
+        image.version = 26;
+        let mut layer = TestLayer::rgba("Missing pixels", 1, 1, Vec::new());
+        layer.props.extend(property);
+        image.layers.push(layer);
+        let result = open(&image.write());
+        if expected {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(matches!(result, Err(IoError::Xcf(reason)) if reason.contains("missing its pixel hierarchy")));
+        }
     }
 }

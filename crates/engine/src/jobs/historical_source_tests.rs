@@ -32,14 +32,14 @@ fn interactive_wrapped_bytes_ask_before_full_inflate_then_resume_validates_strea
             session.color.settings.ask_on_missing = false;
             session.color.settings.ask_on_mismatch = false;
             let asynchronous = !cooperative && !cfg!(target_arch = "wasm32");
-            let started = session.start_open_for_user_with_background("wrapped.xcf.gz", OpenSource::Bytes(bytes.clone()), false).unwrap();
-            assert_eq!(matches!(&started, Started::Job(_)), asynchronous, "native compressed probing must use the worker even when background was false");
+            let started = session.start_open_for_user_with_background("wrapped.xcf.gz", OpenSource::Bytes(bytes.clone()), true).unwrap();
+            assert_eq!(matches!(&started, Started::Job(_)), asynchronous, "an explicit background request uses an available worker");
             let question = complete_open(&mut session, Ok(started)).unwrap();
             let id = question["heldHistoricalXcfOpen"].as_u64().unwrap();
             assert!(session.holds_historical_xcf_open(id));
             assert_eq!(Arc::strong_count(&bytes), 2, "hold the original encoded buffer without copying");
             assert!(session.documents().is_empty());
-            let resumed = session.resume_historical_xcf_open(id, photocraft_io::HistoricalXcfSampleOrder::BigEndian, false);
+            let resumed = session.resume_historical_xcf_open(id, photocraft_io::HistoricalXcfSampleOrder::BigEndian, true);
             if asynchronous {
                 assert!(matches!(&resumed, Ok(Started::Job(_))), "the accepted continuation owns its worker lifecycle: {resumed:?}");
                 assert!(!session.holds_historical_xcf_open(id));
@@ -86,7 +86,7 @@ fn interactive_wrapped_path_retains_verified_bytes_and_resume_never_reopens_path
     let id = question["heldHistoricalXcfOpen"].as_u64().unwrap();
     // A later authorized change to the locator cannot replace the exact already-read source.
     std::fs::write(&path, b"replacement is not an XCF").unwrap();
-    let resumed = session.resume_historical_xcf_open(id, photocraft_io::HistoricalXcfSampleOrder::BigEndian, false).unwrap();
+    let resumed = session.resume_historical_xcf_open(id, photocraft_io::HistoricalXcfSampleOrder::BigEndian, true).unwrap();
     assert!(matches!(&resumed, Started::Job(_)), "retained compressed bytes resume on a native worker");
     assert!(!session.holds_historical_xcf_open(id));
     assert!(session.documents().is_empty());
@@ -110,7 +110,7 @@ fn interactive_wrapped_path_asks_before_corrupt_tail_is_inflated() {
         panic!("inline question")
     };
     let id = question["heldHistoricalXcfOpen"].as_u64().unwrap();
-    let resumed = session.resume_historical_xcf_open(id, photocraft_io::HistoricalXcfSampleOrder::BigEndian, false).unwrap();
+    let resumed = session.resume_historical_xcf_open(id, photocraft_io::HistoricalXcfSampleOrder::BigEndian, true).unwrap();
     assert!(matches!(&resumed, Started::Job(_)), "CRC validation belongs to the accepted native worker");
     assert!(!session.holds_historical_xcf_open(id));
     assert!(complete_open(&mut session, Ok(resumed)).is_err(), "the corrupt retained CRC must fail after the explicit choice");
@@ -140,4 +140,25 @@ fn verified_path_question_retains_exact_source_and_explicit_order_needs_no_captu
             assert!(retained.is_none(), "ordinary explicit-order imports do not retain another encoded buffer");
         }
     }
+}
+
+#[test]
+fn inline_compressed_historical_resume_keeps_its_cancellation_context() {
+    let bytes = wrapped(false);
+    let mut session = Session::new();
+    let Started::Done(question) = session.start_open_for_user_with_background("source.xcf.gz", OpenSource::Bytes(bytes.clone()), false).unwrap() else {
+        panic!("the caller requested inline execution")
+    };
+    let id = question["heldHistoricalXcfOpen"].as_u64().unwrap();
+    let ctx = JobCtx::new();
+    ctx.cancel();
+    session.set_inline_job_ctx(Some(ctx));
+    let order = photocraft_io::HistoricalXcfSampleOrder::BigEndian;
+    assert!(matches!(session.resume_historical_xcf_open(id, order, false), Err(EngineError::Cancelled)));
+    assert!(session.holds_historical_xcf_open(id));
+    assert!(session.documents().is_empty());
+    session.set_inline_job_ctx(None);
+    session.color.settings.ask_on_missing = false;
+    assert!(matches!(session.resume_historical_xcf_open(id, order, false).unwrap(), Started::Done(_)));
+    assert!(!session.holds_historical_xcf_open(id));
 }

@@ -70,6 +70,9 @@ fn hold_with_budget(
     destination: Destination,
     byte_budget: u64,
 ) -> Result<Value> {
+    if u64::try_from(bytes.capacity()).unwrap_or(u64::MAX) > byte_budget {
+        return Err(EngineError::Other(format!("the retained historical XCF source exceeds the {byte_budget}-byte source limit")));
+    }
     if s.jobs.historical_xcf.len() >= MAX_HELD || s.pending_import_bytes_with(Some(&bytes))? > byte_budget {
         return Err(EngineError::Other("too many historical XCF sources await a sample-order choice; finish or cancel an earlier choice".into()));
     }
@@ -152,6 +155,11 @@ impl Session {
             return Err(EngineError::Other("the placement target changed; drop the file again".into()));
         }
         Ok(())
+    }
+
+    /// Whether the pending encoded source needs decompression when the UI resumes it.
+    pub fn historical_xcf_open_is_compressed(&self, id: u64) -> bool {
+        self.jobs.historical_xcf.iter().find(|held| held.id == id).is_some_and(|held| super::has_compressed_import_signature(&held.bytes))
     }
 
     /// Whether the session still owns the exact encoded source awaiting its choice.

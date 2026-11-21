@@ -424,7 +424,7 @@ fn incomplete_optional_path_framing_preserves_saved_pixels_without_raw_attachmen
         let paths: Vec<_> = report.entries.iter().filter(|entry| entry.feature_code == "xcf.path").collect();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].reason, ConversionReason::InvalidOptionalData);
-        assert_eq!(paths[0].disposition, ConversionDisposition::RetainedUnapplied);
+        assert_eq!(paths[0].disposition, ConversionDisposition::SkippedNonessential);
         assert!(paths[0].targets.is_empty());
         assert!(paths[0].attachments.is_empty());
         let native = photocraft_format::save_to_bytes(&result.document, &Default::default()).unwrap();

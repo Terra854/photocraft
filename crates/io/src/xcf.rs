@@ -289,7 +289,7 @@ impl<'a> Image<'a> {
                     feature_code: "xcf.effect_list".into(),
                     source: conversion::source("effect_list", 0, offset, "", &[], None),
                     targets: Vec::new(),
-                    disposition: ConversionDisposition::RetainedUnapplied,
+                    disposition: ConversionDisposition::SkippedNonessential,
                     reason: ConversionReason::InvalidOptionalData,
                     source_description: format!("Optional effect pointer list could not be decoded: {error}"),
                     native_description: "No effects from this malformed list were followed; independently framed native pixels preserved".into(),
@@ -1763,14 +1763,14 @@ fn unavailable_path<'a>(image: &mut Image<'a>, ordinal: usize, offset: usize, na
         feature_code: "xcf.path".into(),
         source: conversion::source("path", ordinal, offset, name, &[], None),
         targets: Vec::new(),
-        disposition: ConversionDisposition::RetainedUnapplied,
+        disposition: ConversionDisposition::SkippedNonessential,
         reason: ConversionReason::InvalidOptionalData,
         source_description: format!("Optional saved path could not be translated: {error}"),
         native_description: "Usable native image content preserved; bounded saved-path configuration remains inert when the retention allowance permits".into(),
         attachments: Vec::new(),
     })?;
     if let Some(raw) = raw {
-        image.outcomes.property_with_reason(outcome, 25, offset, raw, ConversionReason::InvalidOptionalData)?;
+        image.outcomes.primary_property(outcome, 25, offset, raw, ConversionReason::InvalidOptionalData)?;
     }
     image.warnings.note("Optional saved paths could not be translated; usable pixels were preserved. See the conversion report");
     Ok(())

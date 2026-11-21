@@ -115,7 +115,10 @@ fn pending_sources_charge_retained_and_incoming_capacity_after_truncation() {
     assert_eq!(s.jobs.historical_xcf.len(), 1, "the earlier source survives the refused second allocation");
     let mut buffer = Vec::with_capacity(512);
     buffer.push(0);
-    assert!(hold_with_budget(&mut Session::new(), "large.xcf".into(), Arc::new(buffer), question, Default::default(), Destination::Open, 200).is_err());
+    let too_large =
+        hold_with_budget(&mut Session::new(), "large.xcf".into(), Arc::new(buffer), question, Default::default(), Destination::Open, 200).unwrap_err();
+    assert!(too_large.to_string().contains("200-byte source limit"));
+    assert!(!too_large.to_string().contains("cancel"));
     assert!(s.cancel_historical_xcf_open(held["heldHistoricalXcfOpen"].as_u64().unwrap()));
     assert_eq!(Arc::strong_count(&first), 1);
 }
@@ -183,7 +186,7 @@ fn refused_historical_start_retains_exact_source_and_choice_identity_for_retry()
 }
 
 #[test]
-fn a_held_smart_object_open_is_not_recorded_before_the_user_answers() {
+fn a_held_smart_object_open_records_the_chosen_order_once_after_completion() {
     use serde_json::json;
 
     let directory = tempfile::tempdir().unwrap();
@@ -201,6 +204,25 @@ fn a_held_smart_object_open_is_not_recorded_before_the_user_answers() {
         assert!(reply["heldHistoricalXcfOpen"].is_u64(), "{reply}");
         assert!(session.documents().is_empty());
         assert!(session.journal.is_empty(), "{:?}", session.journal);
+        session.color.settings.ask_on_missing = false;
+        session.color.settings.ask_on_mismatch = false;
+        let id = reply["heldHistoricalXcfOpen"].as_u64().unwrap();
+        match session.resume_historical_xcf_open(id, photocraft_io::HistoricalXcfSampleOrder::LittleEndian, background).unwrap() {
+            Started::Job(job) => {
+                assert!(session.journal.is_empty());
+                session.wait_job(job).unwrap();
+            }
+            Started::Done(_) => assert!(!background),
+        }
+        assert_eq!(session.documents().len(), 1);
+        let explicit = json!({"path":path,"historicalXcfSampleOrder":"little-endian"});
+        assert_eq!(session.journal, [("file.openAsSmartObject".to_owned(), explicit.clone())]);
+        let mut replay = Session::new();
+        replay.color.settings.ask_on_missing = false;
+        replay.color.settings.ask_on_mismatch = false;
+        replay.execute(&session.journal[0].0, session.journal[0].1.clone()).unwrap();
+        assert_eq!(replay.documents().len(), 1);
+        assert_eq!(replay.journal, session.journal);
     }
 }
 

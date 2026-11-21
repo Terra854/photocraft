@@ -81,7 +81,8 @@ pub(crate) fn answer(app: &mut PhotocraftApp, fields: &serde_json::Map<String, V
     if let Some(front) = app.prompt_order.front_mut() {
         *front = PromptKind::Resuming(id);
     }
-    let started = app.session.resume_historical_xcf_open(id, order, app.background_jobs).map_err(|error| error.to_string());
+    let background = app.background_jobs || app.session.historical_xcf_open_is_compressed(id);
+    let started = app.session.resume_historical_xcf_open(id, order, background).map_err(|error| error.to_string());
     match started {
         Ok(Started::Job(job)) => {
             let held = app.historical_opens.iter_mut().find(|held| held.id == id).ok_or("historical source is gone")?;

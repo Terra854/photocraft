@@ -103,15 +103,10 @@ fn prepare(path: String, bytes: Arc<Vec<u8>>, options: ImportOptions, confirm_da
 /// Decode the exact source held by the interactive sample-order prompt.
 pub(crate) fn resume_smart_object(s: &mut Session, path: String, bytes: Arc<Vec<u8>>, options: ImportOptions, background: bool) -> Result<Started> {
     let name = file_name(&path);
-    s.start_job_with_spawn(
-        CMD,
-        json!({"path":path,"historicalXcfSampleOrder":options.historical_xcf_sample_order}),
-        &format!("Opening {name}"),
-        false,
-        background,
-        move |ctx| prepare(path, bytes, options, false, ctx),
-        |s, ready| ready.apply(s),
-    )
+    let params = json!({"path":path,"historicalXcfSampleOrder":options.historical_xcf_sample_order});
+    s.dispatch_retained_open(CMD, params, background, move |s| {
+        crate::jobs::run(s, &format!("Opening {name}"), false, move |ctx| prepare(path, bytes, options, false, ctx), |s, ready| ready.apply(s))
+    })
 }
 
 fn apply(

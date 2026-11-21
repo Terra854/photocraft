@@ -2,6 +2,8 @@
 
 use super::{MAX_PAYLOAD, MAX_STRING, Read, Result, invalid};
 
+const MAX_PROPERTIES: usize = 4096;
+
 #[cfg(test)]
 mod parasite_retention_tests;
 #[cfg(test)]
@@ -155,8 +157,20 @@ pub(super) trait PropertyInput {
         Ok(None)
     }
 
-    /// A prefix reader can request a retry with source-wide framing evidence.
-    fn unresolved_palette_boundary(&mut self) {}
+    /// The cheaper streaming probe stops before expanding its lookahead to all properties.
+    fn property_lookahead_limit(&self) -> usize {
+        64
+    }
+
+    /// A prefix reader can choose which ambiguous boundary to try in a bounded replay.
+    fn unresolved_palette_boundary(&mut self, preferred: bool) -> bool {
+        preferred
+    }
+
+    /// A layer cursor can check which property list leaves valid hierarchy and mask pointers.
+    fn link_drawable_framed(&self, _end: usize) -> bool {
+        false
+    }
 }
 
 impl PropertyInput for Cursor<'_> {
@@ -186,7 +200,9 @@ impl PropertyInput for Cursor<'_> {
     fn compare_palette_tables(&self, declared: usize, repaired: usize, version: u32, ctl: &photocraft_raster::Interrupt<'_>) -> Result<Option<bool>> {
         let tables = |offset| {
             let Some(start) = self.pos.checked_add(offset) else { return Ok(None) };
-            drawable_tables(self.at(start), version, ctl)
+            let mut cursor = self.at(start);
+            let limit = cursor.b.len();
+            drawable_tables(|| Ok((cursor.ptr_wire()?, cursor.pos)), version, limit, ctl)
         };
         let declared = tables(declared)?;
         let repaired = tables(repaired)?;
@@ -194,37 +210,71 @@ impl PropertyInput for Cursor<'_> {
         // A framed table with actual drawables is stronger evidence.
         Ok((declared != repaired).then_some(repaired > declared))
     }
+
+    fn property_lookahead_limit(&self) -> usize {
+        MAX_PROPERTIES
+    }
+
+    fn link_drawable_framed(&self, end: usize) -> bool {
+        let Some(start) = self.pos.checked_add(end) else { return false };
+        let mut c = self.at(start);
+        let (Ok(hierarchy), Ok(mask)) = (c.ptr(), c.ptr()) else { return false };
+        if mask != 0 && (mask < c.pos || mask.checked_add(12).is_none_or(|end| end > c.b.len())) {
+            return false;
+        }
+        if hierarchy == 0 {
+            return true;
+        }
+        if hierarchy < c.pos {
+            return false;
+        }
+        let mut header = c.at(hierarchy);
+        let (Ok(width), Ok(height), Ok(bpp)) = (header.u32(), header.u32(), header.u32()) else { return false };
+        super::validate_canvas(width, height).is_ok() && (1..=32).contains(&bpp)
+    }
 }
 
-/// Inspect the table framing without retaining or following any offset. A
-/// required drawable must lie after the tables and have space for a header.
-fn drawable_tables(mut cursor: Cursor<'_>, version: u32, ctl: &photocraft_raster::Interrupt<'_>) -> Result<Option<bool>> {
+/// Read just the pointer tables. Never follow an offset or assume a missing path terminator.
+pub(super) fn drawable_tables(
+    mut next: impl FnMut() -> Result<(u64, usize)>,
+    version: u32,
+    upper_bound: usize,
+    ctl: &photocraft_raster::Interrupt<'_>,
+) -> Result<Option<bool>> {
     let mut first_drawable = None;
     for limit in [super::MAX_LAYERS, super::MAX_CHANNELS] {
         for count in 0..=limit {
             ctl.check().map_err(|_| super::IoError::Cancelled)?;
-            let Ok(pointer) = cursor.ptr() else { return Ok(None) };
+            let Ok((pointer, position)) = next() else { return Ok(None) };
+            if first_drawable.is_some_and(|first| position > first) {
+                return Ok(None);
+            }
             if pointer == 0 {
                 break;
             }
-            if count == limit || pointer < cursor.pos || pointer.checked_add(12).is_none_or(|end| end > cursor.b.len()) {
+            let Ok(pointer) = usize::try_from(pointer) else { return Ok(None) };
+            if count == limit || pointer < position || pointer.checked_add(12).is_none_or(|end| end > upper_bound) {
                 return Ok(None);
             }
             first_drawable = Some(first_drawable.map_or(pointer, |first: usize| first.min(pointer)));
         }
     }
     if version >= 18 {
-        // Standalone paths are optional. Validate their table's terminator,
-        // without requiring every optional path target to be valid.
         for count in 0..=super::MAX_CHANNELS {
             ctl.check().map_err(|_| super::IoError::Cancelled)?;
-            let Ok(pointer) = cursor.ptr_wire() else { return Ok(None) };
-            if pointer == 0 || count == super::MAX_CHANNELS {
+            let Ok((pointer, position)) = next() else { return Ok(None) };
+            if first_drawable.is_some_and(|first| position > first) {
+                return Ok(None);
+            }
+            if pointer == 0 {
                 break;
+            }
+            if count == super::MAX_CHANNELS {
+                return Ok(None);
             }
         }
     }
-    Ok(first_drawable.is_none_or(|first| cursor.pos <= first).then_some(first_drawable.is_some()))
+    Ok(Some(first_drawable.is_some()))
 }
 
 pub(super) fn property_header(input: &mut impl PropertyInput, count: usize) -> Result<Option<(u32, usize)>> {
@@ -233,7 +283,7 @@ pub(super) fn property_header(input: &mut impl PropertyInput, count: usize) -> R
     if kind == 0 {
         return Ok(None);
     }
-    if count >= 4096 {
+    if count >= MAX_PROPERTIES {
         return Err(invalid("too many properties"));
     }
     Ok(Some((kind, declared)))
@@ -279,19 +329,9 @@ pub(super) fn property_payload(
             }
             return Ok(0);
         }
-        // PROP_LINK_LAYER can declare four bytes too few (#8857).
-        (48, _) if (12..=MAX_STRING + 16).contains(&declared) => {
-            let name_len = input.peek(4, 4)?.and_then(be_u32).map(|n| n as usize);
-            let repaired = declared + 4;
-            let length = if let Some(name_len) = name_len.filter(|n| *n <= MAX_STRING && *n + 16 == repaired)
-                && (name_len == 0 || input.peek(8 + name_len - 1, 1)?.is_some_and(|end| end == [0]))
-            {
-                repaired
-            } else {
-                declared
-            };
-            (length, 0)
-        }
+        // PROP_LINK_LAYER can declare four bytes too few (#8857). Repair only
+        // when the extra height has a credible continuation.
+        (48, _) if (12..=MAX_STRING + 16).contains(&declared) => (link_length(input, declared, version, ctl)?, 0),
         _ => (declared, 0),
     };
     if length > MAX_PAYLOAD {
@@ -316,37 +356,59 @@ fn repair_palette_boundary(
         return Ok(true);
     }
 
-    let declared = palette_continuation(input, declared, version, ctl)?;
-    let repaired = palette_continuation(input, repaired, version, ctl)?;
+    let declared = property_continuation(input, declared, version, ctl)?;
+    let repaired = property_continuation(input, repaired, version, ctl)?;
     if let (Some(left), Some(right)) = (declared.end, repaired.end)
         && let Some(preference) = input.compare_palette_tables(left, right, version, ctl)?
     {
         return Ok(preference);
     }
-    if !repaired.invalid && !(declared.invalid && repaired.end.is_some()) {
-        input.unresolved_palette_boundary();
+    let prefer_repaired = repaired.end.is_some() && (declared.invalid || repaired.unusual_lengths < declared.unusual_lengths);
+    if repaired.invalid || (repaired.end.is_some() && declared.invalid) {
+        return Ok(prefer_repaired);
     }
-    // An exact fixed-size record is stronger evidence than an overlapping
-    // header with an odd size when the drawable tables do not distinguish them.
-    Ok(repaired.end.is_some() && (declared.invalid || repaired.unusual_lengths < declared.unusual_lengths))
+    if let (Some(left), Some(right)) = (declared.canonical_end, repaired.canonical_end)
+        && left != right
+    {
+        return Ok(right);
+    }
+    Ok(input.unresolved_palette_boundary(prefer_repaired))
+}
+
+fn link_length(input: &mut impl PropertyInput, declared: usize, version: Option<u32>, ctl: &photocraft_raster::Interrupt<'_>) -> Result<usize> {
+    let repaired = declared + 4;
+    let Some(name_len) = input.peek(4, 4)?.and_then(be_u32).map(|n| n as usize).filter(|n| *n <= MAX_STRING && *n + 16 == repaired) else {
+        return Ok(declared);
+    };
+    if name_len != 0 && !input.peek(8 + name_len - 1, 1)?.is_some_and(|end| end == [0]) {
+        return Ok(declared);
+    }
+    let left = property_continuation(input, declared, version.unwrap_or(25), ctl)?;
+    let right = property_continuation(input, repaired, version.unwrap_or(25), ctl)?;
+    let left_framed = left.end.is_some_and(|end| input.link_drawable_framed(end));
+    let right_framed = right.end.is_some_and(|end| input.link_drawable_framed(end));
+    let extend =
+        if left_framed != right_framed { right_framed } else { right.end.is_some() && (left.end.is_none() || right.unusual_lengths < left.unusual_lengths) };
+    Ok(if extend { repaired } else { declared })
 }
 
 #[derive(Default)]
-struct PaletteContinuation {
+struct PropertyContinuation {
     end: Option<usize>,
+    canonical_end: Option<bool>,
     unusual_lengths: usize,
     invalid: bool,
 }
 
-fn palette_continuation(
+fn property_continuation(
     input: &mut impl PropertyInput,
     mut offset: usize,
     version: u32,
     ctl: &photocraft_raster::Interrupt<'_>,
-) -> Result<PaletteContinuation> {
+) -> Result<PropertyContinuation> {
     let limit = input.palette_lookahead_limit();
-    let mut continuation = PaletteContinuation::default();
-    'properties: for _ in 0..64 {
+    let mut continuation = PropertyContinuation::default();
+    'properties: for _ in 0..=input.property_lookahead_limit() {
         ctl.check().map_err(|_| super::IoError::Cancelled)?;
         if offset > limit.saturating_sub(8) {
             continuation.invalid = input.palette_lookahead_is_complete();
@@ -361,6 +423,7 @@ fn palette_continuation(
         if kind == 0 {
             // PROP_END ignores its length. Prefer a canonical END when both choices terminate.
             continuation.end = Some(offset + 8);
+            continuation.canonical_end = Some(length == 0);
             continuation.unusual_lengths += usize::from(length != 0);
             break;
         }
@@ -610,3 +673,19 @@ pub(super) fn rle_decode(input: &[u8], bpp: usize, pixels: usize) -> Result<Vec<
 
 #[cfg(test)]
 mod rle_tests;
+
+#[cfg(test)]
+#[test]
+fn path_table_evidence_requires_a_terminator_at_the_inspection_limit() {
+    use super::{Interrupt, MAX_CHANNELS};
+    for terminated in [false, true] {
+        let mut pointers = std::iter::once(1 << 24).chain([0, 0]).chain(std::iter::repeat_n(42, MAX_CHANNELS)).chain([if terminated { 0 } else { 42 }]);
+        let mut position = 0;
+        let next = || {
+            position += 8;
+            Ok((pointers.next().ok_or_else(|| invalid("short pointer table"))?, position))
+        };
+        let evidence = drawable_tables(next, 26, 1 << 25, &Interrupt::NONE).unwrap();
+        assert_eq!(evidence, terminated.then_some(true));
+    }
+}

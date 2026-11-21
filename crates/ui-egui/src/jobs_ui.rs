@@ -298,7 +298,8 @@ pub fn start_open(
     order: Option<OpenOrder>,
 ) -> Result<(), String> {
     let name = &app.open_name(name);
-    match app.session.start_open_for_user_with_background(name, source, app.background_jobs).map_err(|e| e.to_string())? {
+    let background = app.background_jobs || matches!(&source, OpenSource::Bytes(bytes) if photocraft_engine::jobs::has_compressed_import_signature(bytes));
+    match app.session.start_open_for_user_with_background(name, source, background).map_err(|e| e.to_string())? {
         // Inline (wasm, or background jobs off): finish now, like a background open that ended at
         // once. A preflight keeps the slot and set order in its memory prompt.
         Started::Done(v) => finish_open(app, name, path.as_deref(), &v, slot, order),

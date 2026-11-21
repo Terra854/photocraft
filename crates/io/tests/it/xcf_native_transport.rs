@@ -76,7 +76,18 @@ fn compressed_non_xcf_content_keeps_its_ordinary_route() {
     assert!(photocraft_io::import("not-xcf.xcf.gz", &gzip(b"unrelated text")).is_err());
 }
 
-/// Compare native import across bzip2/XZ while rejecting every truncation, checksum error, unrelated tail and oversized XZ dictionary.
+#[test]
+fn every_truncated_bzip2_and_xz_prefix_of_a_tiny_xcf_is_rejected() {
+    let bytes = photocraft_testkit::xcf::modern_pixel(0x1234);
+    for (name, wrapped) in [("tiny.xcf.bz2", bzip2(&bytes)), ("tiny.xcf.xz", xz(&bytes, 0))] {
+        assert!(photocraft_io::import(name, &wrapped).is_ok());
+        for end in 6..wrapped.len() {
+            assert!(photocraft_io::import(name, &wrapped[..end]).is_err(), "{name}: truncation {end}");
+        }
+    }
+}
+
+/// Compare native import across bzip2/XZ while rejecting representative truncations, bad checksums and oversized dictionaries.
 #[test]
 fn bzip2_and_xz_use_the_same_native_import_and_validate_complete_streams() {
     let source = source();
@@ -87,7 +98,7 @@ fn bzip2_and_xz_use_the_same_native_import_and_validate_complete_streams() {
             assert!(imported.source_read_only);
             assert_eq!(photocraft_compose::flatten(&imported.document).px, photocraft_compose::flatten(&expected).px);
         }
-        for end in 6..wrapped.len() {
+        for end in [6, wrapped.len() / 2, wrapped.len() - 1] {
             assert!(photocraft_io::import(name, &wrapped[..end]).is_err(), "{name}: truncation {end}");
         }
         assert!(photocraft_io::import(name, &[wrapped.as_slice(), b"unrelated trailing data"].concat()).is_err());

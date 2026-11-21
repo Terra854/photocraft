@@ -61,7 +61,9 @@ fn svg_prefix_recognizes_a_large_drawing_without_validating_its_unread_body() {
         matches!(decode_import("renamed.bin", &wrapped, &Interrupt::NONE, true), Err(IoError::Svg(_))),
         "actual import still verifies the first-member CRC"
     );
-    assert!(svg_prefix("invalid.svgz", &gzip(b"not SVG"), &Interrupt::NONE).unwrap().is_none());
+    let invalid = gzip(b"not SVG");
+    assert!(svg_prefix("invalid.svgz", &invalid, &Interrupt::NONE).unwrap().is_some());
+    assert!(crate::import("invalid.svgz", &invalid).is_err());
     assert!(svg_prefix("source.svgz", &gzip(&[MAGIC, &vec![0; SVG_PROBE_BYTES]].concat()), &Interrupt::NONE).unwrap().is_none());
 }
 

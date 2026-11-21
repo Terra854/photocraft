@@ -333,6 +333,9 @@ fn apply_source(
         app.refocus(target.doc)?;
         return app.run(action.command(), json!({"layer":target.layer.0,"historicalXcfSampleOrder":order}));
     }
+    if let Action::Replace(target) = action {
+        app.check_automation_command(action.command(), &json!({"layer":target.layer.0,"historicalXcfSampleOrder":order}))?;
+    }
     let bytes = owned_bytes(bytes.ok_or("the picked Smart Object source is gone")?);
     if let Action::Place { doc, linked, .. } = action {
         app.refocus(doc)?;
@@ -383,6 +386,11 @@ fn apply_source(
         .map_err(|error| error.to_string())
     });
     app.sync_views();
+    if let Ok(value) = &result
+        && value["pending"].as_bool() != Some(true)
+    {
+        crate::notices::io_result_warnings(app, value, name);
+    }
     result
 }
 

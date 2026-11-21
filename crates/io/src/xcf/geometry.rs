@@ -6,18 +6,43 @@ use super::{Interrupt, IoError, Result, invalid, is_xcf, metadata, read_header, 
 
 type Geometry = ((f64, f64), f64);
 
+enum Scan {
+    Framed(Geometry, Option<bool>),
+    Competing(bool),
+}
+
 /// Unclaimed input stays available to the ordinary non-XCF geometry reader.
-/// The usual prefix scan stops at image-property END. Competing palette boundaries
-/// can require the complete envelope and drawable table framing.
+/// A normal scan ends at image properties. Ambiguous compressed framing can also read
+/// the pointer tables, but it never needs the inflated drawables or the envelope tail.
 pub(super) fn source_geometry(name: &str, bytes: &[u8], ctl: &Interrupt<'_>) -> Result<Option<Geometry>> {
-    match transport::with_xcf_prefix(name, bytes, ctl, |reader| scan(reader, ctl))? {
+    match transport::with_xcf_prefix(name, bytes, ctl, |reader| scan(reader, ctl, None))? {
         None => Ok(None),
-        Some(Some(geometry)) => Ok(Some(geometry)),
-        Some(None) if is_xcf(bytes) => scan_authoritative(bytes, ctl).map(Some),
-        Some(None) => {
-            let source = transport::decode_import(name, bytes, ctl, false)?.ok_or_else(|| invalid("could not read the XCF palette boundary"))?;
-            scan_authoritative(&source.bytes, ctl).map(Some)
-        }
+        Some(Scan::Framed(geometry, _)) => Ok(Some(geometry)),
+        Some(Scan::Competing(_)) if is_xcf(bytes) => scan_authoritative(bytes, ctl).map(Some),
+        Some(Scan::Competing(preferred)) => compare_prefixes(name, bytes, ctl, preferred).map(Some),
+    }
+}
+
+fn compare_prefixes(name: &str, bytes: &[u8], ctl: &Interrupt<'_>, preferred: bool) -> Result<Geometry> {
+    // Replay each interpretation independently. Large property payloads can be discarded
+    // a chunk at a time, without buffering everything between the competing positions.
+    let scan_with = |repair| match transport::with_xcf_prefix(name, bytes, ctl, |reader| scan(reader, ctl, Some(repair)))? {
+        Some(Scan::Framed(geometry, evidence)) => Ok((geometry, evidence)),
+        _ => Err(invalid("could not read the XCF palette boundary")),
+    };
+    let first = scan_with(preferred);
+    if let Ok((geometry, Some(true))) = first {
+        return Ok(geometry);
+    }
+    if matches!(first, Err(IoError::Cancelled)) {
+        return Err(IoError::Cancelled);
+    }
+    let second = scan_with(!preferred);
+    match (first, second) {
+        (_, Err(IoError::Cancelled)) => Err(IoError::Cancelled),
+        (Ok((geometry, a)), Ok((alternate, b))) => Ok(if b > a { alternate } else { geometry }),
+        (Ok((geometry, _)), Err(_)) | (Err(_), Ok((geometry, _))) => Ok(geometry),
+        (Err(error), Err(_)) => Err(error),
     }
 }
 
@@ -28,7 +53,7 @@ fn scan_authoritative(bytes: &[u8], ctl: &Interrupt<'_>) -> Result<Geometry> {
     Ok(((f64::from(header.width), f64::from(header.height)), f64::from(metadata::image_resolution(&properties, 72.))))
 }
 
-fn scan(reader: &mut dyn Read, ctl: &Interrupt<'_>) -> Result<Option<Geometry>> {
+fn scan(reader: &mut dyn Read, ctl: &Interrupt<'_>, repair: Option<bool>) -> Result<Scan> {
     // Use the shared version/header validators, including legacy 26-byte headers.
     let mut bytes = [0; 30];
     read(reader, bytes.get_mut(..14).ok_or_else(|| invalid("invalid geometry header range"))?)?;
@@ -37,18 +62,20 @@ fn scan(reader: &mut dyn Read, ctl: &Interrupt<'_>) -> Result<Option<Geometry>> 
     let length = if version >= 4 { 30 } else { 26 };
     read(reader, bytes.get_mut(14..length).ok_or_else(|| invalid("invalid geometry header range"))?)?;
     let (_, header) = read_header(bytes.get(..length).ok_or_else(|| invalid("invalid geometry header length"))?)?;
-    let mut input = Stream::new(reader);
+    let mut input = Stream::new(reader, length, repair);
     let mut dpi = 72.;
     let mut count = 0;
     loop {
         ctl.check().map_err(|_| IoError::Cancelled)?;
         let Some((kind, declared)) = wire::property_header(&mut input, count)? else {
-            return Ok(Some(((f64::from(header.width), f64::from(header.height)), f64::from(dpi))));
+            let geometry = ((f64::from(header.width), f64::from(header.height)), f64::from(dpi));
+            let evidence = if repair.is_some() { wire::drawable_tables(|| input.pointer(version), version, super::MAX_INFLATED, ctl)? } else { None };
+            return Ok(Scan::Framed(geometry, evidence));
         };
         count += 1;
         let remaining = wire::property_payload(&mut input, kind, declared, Some(header.version), header.base_type == 2, ctl)?;
-        if input.unresolved_palette {
-            return Ok(None);
+        if let Some(preferred) = input.unresolved_palette {
+            return Ok(Scan::Competing(preferred));
         }
         if kind == 19 && remaining >= 8 {
             let mut pair = [0; 8];
@@ -66,12 +93,22 @@ struct Stream<'a> {
     reader: &'a mut dyn Read,
     buffered: Vec<u8>,
     consumed: usize,
-    unresolved_palette: bool,
+    position: usize,
+    replay: bool,
+    choice: Option<bool>,
+    unresolved_palette: Option<bool>,
 }
 
 impl<'a> Stream<'a> {
-    fn new(reader: &'a mut dyn Read) -> Self {
-        Self { reader, buffered: Vec::new(), consumed: 0, unresolved_palette: false }
+    fn new(reader: &'a mut dyn Read, position: usize, choice: Option<bool>) -> Self {
+        Self { reader, buffered: Vec::new(), consumed: 0, position, replay: choice.is_some(), choice, unresolved_palette: None }
+    }
+
+    fn pointer(&mut self, version: u32) -> Result<(u64, usize)> {
+        let mut bytes = [0; 8];
+        let start = if version < 11 { 4 } else { 0 };
+        self.read_exact(&mut bytes[start..])?;
+        Ok((u64::from_be_bytes(bytes), self.position))
     }
 
     fn read_exact(&mut self, output: &mut [u8]) -> Result<()> {
@@ -84,13 +121,19 @@ impl<'a> Stream<'a> {
             self.buffered.clear();
             self.consumed = 0;
         }
-        read(self.reader, tail)
+        read(self.reader, tail)?;
+        self.position += output.len();
+        Ok(())
     }
 }
 
 impl wire::PropertyInput for Stream<'_> {
-    fn unresolved_palette_boundary(&mut self) {
-        self.unresolved_palette = true;
+    fn unresolved_palette_boundary(&mut self, preferred: bool) -> bool {
+        if self.replay {
+            return self.choice.take().unwrap_or(preferred);
+        }
+        self.unresolved_palette = Some(preferred);
+        preferred
     }
 
     fn word(&mut self) -> Result<u32> {
