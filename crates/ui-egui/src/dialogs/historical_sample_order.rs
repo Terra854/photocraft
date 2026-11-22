@@ -11,6 +11,13 @@ const OPEN: &str = "historicalXcfOpen";
 const REPLACE: &str = "historicalXcfReplacement";
 const ORDER: &str = "historicalXcfSampleOrder";
 
+pub(super) fn selected_order(fields: &Map<String, Value>, command: &str) -> Result<photocraft_doc::HistoricalXcfSampleOrder, String> {
+    photocraft_engine::file_cmds::historical_xcf_sample_order(&Value::Object(fields.clone()), command)
+        .ok()
+        .flatten()
+        .ok_or_else(|| tl!("Choose Little-endian or Big-endian, or Cancel").into())
+}
+
 /// Explicit order for processing workflows that cannot stop for per-file questions.
 pub(crate) fn order_choice() -> Param {
     let options = [("", tl!("Unspecified")), ("little-endian", tl!("Little-endian")), ("big-endian", tl!("Big-endian"))]
@@ -93,7 +100,7 @@ fn fields(key: &str, form: &DialogFields) -> Option<(PromptKind, Map<String, Val
 }
 
 fn check(app: &mut PhotocraftApp, result: &ParamResult) -> Result<(), Label> {
-    let Some((kind, fields)) = fields(&result.key, &result.fields) else { return Err(Label::from("The historical XCF source is gone.")) };
+    let Some((kind, fields)) = fields(&result.key, &result.fields) else { return Err(Label::from(tl!("The historical XCF source is gone."))) };
     match kind {
         PromptKind::Historical(_) => historical_xcf::validate(app, &fields),
         PromptKind::Replacement(_) => historical_replace::validate(app, &fields),

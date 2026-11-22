@@ -217,6 +217,8 @@ pub struct ImportResult {
     /// Only a stand-in picture of the file (an Affinity document whose native data couldn't be
     /// read): Open shows it with its warning; Place and other auxiliary imports refuse it.
     pub preview_only: bool,
+    /// Sample order actually used by an ambiguous historical XCF decoder.
+    pub historical_xcf_sample_order: Option<HistoricalXcfSampleOrder>,
 }
 
 /// Identity of the file behind an opened handle, read from that handle.
@@ -758,7 +760,7 @@ pub struct ImportOptions {
     pub max_group_depth: usize,
     /// The demosaic method camera raws are developed with.
     pub demosaic: raw::Demosaic,
-    /// Required only for multibyte development XCF7–11 samples. No default is
+    /// Required only for multibyte development XCF4–11 samples. No default is
     /// inferred from the current machine, file name, producer or pixel values.
     pub historical_xcf_sample_order: Option<HistoricalXcfSampleOrder>,
     /// Keep a developed raw's sensor data for its open-time Camera Raw dialog
@@ -964,7 +966,7 @@ fn import_psd(
     *damaged = psd_damaged;
     document.name = name.to_string();
     text_import::prepare(&mut document, txt2.as_ref());
-    Ok(ImportResult { initial_view: None, document, warnings, source_read_only: false, preview_only: false })
+    Ok(ImportResult { initial_view: None, document, warnings, source_read_only: false, preview_only: false, historical_xcf_sample_order: None })
 }
 
 /// [`import_for_open_with`] for the file at `path`. A PSD/PSB is parsed from the open file
@@ -1265,7 +1267,14 @@ fn import_stages(
     match selected {
         Route::Pcraft => {
             let document = photocraft_format::load_from_bytes(bytes)?;
-            Ok(ImportResult { initial_view: None, warnings: open_warnings(&document), document, source_read_only: false, preview_only: false })
+            Ok(ImportResult {
+                initial_view: None,
+                warnings: open_warnings(&document),
+                document,
+                source_read_only: false,
+                preview_only: false,
+                historical_xcf_sample_order: None,
+            })
         }
         Route::Psd | Route::NamedPsd => import_psd(name, ctl, damaged, opts, |want, recover| PsdFile::from_bytes_and_merged_preflight(bytes, want, recover)),
         Route::Affinity => affinity::import(name, bytes, ctl),

@@ -1617,14 +1617,14 @@ fn malformed_tile_list_terminator_is_rejected_before_decoding() {
         let at = hierarchy(&mut w, 1, 1, 4, &[17, 31, 57, 255], Compression::None);
         let mut image = decoder_image(&w.out);
         image.c.wide = wide;
-        let expected = image.hierarchy_with_alpha(at, 4, false, false, &Interrupt::NONE).unwrap();
+        let expected = image.decode_hierarchy(at, 4, false, false, None, &Interrupt::NONE).unwrap();
         assert_eq!(expected.data.len(), 4);
         let pointer_bytes = if wide { 8 } else { 4 };
         let terminator = at + 12 + 2 * pointer_bytes + 8 + pointer_bytes;
         w.patch(terminator, at);
         let mut image = decoder_image(&w.out);
         image.c.wide = wide;
-        let error = image.hierarchy_with_alpha(at, 4, false, false, &Interrupt::NONE).err().unwrap();
+        let error = image.decode_hierarchy(at, 4, false, false, None, &Interrupt::NONE).err().unwrap();
         assert!(error.to_string().contains("zero terminator"), "{error}");
     }
 }

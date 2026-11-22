@@ -424,14 +424,14 @@ pub(super) fn image_with_work<'a>(
                         continue;
                     }
                 };
-                if tree.root_element().has_tag_name("metadata") {
-                    for node in tree.root_element().children().filter(|n| n.has_tag_name("tag")) {
+                if craft_xml::Pat::matches(craft_xml::Local("metadata"), &tree.name) {
+                    for node in tree.children(craft_xml::Local("tag")) {
                         ctl.check().map_err(|_| super::IoError::Cancelled)?;
-                        if node.attribute("encoding").is_some() {
+                        if node.attr("encoding").is_some() {
                             metadata_incomplete = true;
                             continue;
                         }
-                        if let (Some(key), Some(value)) = (node.attribute("name"), plain_tag_text(node))
+                        if let (Some(key), Some(value)) = (node.attr("name"), plain_tag_text(node))
                             && matches!(key.split('.').next(), Some("Exif" | "Xmp" | "Iptc"))
                         {
                             let omitted = !push_text(doc, key, &value, &mut text_storage, budget);
@@ -496,15 +496,17 @@ pub(super) fn image_with_work<'a>(
     Ok(())
 }
 
-/// Admit XML parser work before allocating a DOM for optional metadata.
 /// Borrow a single segment and bound copies before joining split text nodes.
-pub(super) fn plain_tag_text<'a>(tag: roxmltree::Node<'a, '_>) -> Option<std::borrow::Cow<'a, str>> {
+pub(super) fn plain_tag_text(tag: &craft_xml::El) -> Option<std::borrow::Cow<'_, str>> {
     use std::borrow::Cow;
 
-    if tag.attribute("encoding").is_some() || tag.children().any(|child| child.is_element()) {
+    if tag.attr("encoding").is_some() || tag.elements().next().is_some() {
         return None;
     }
-    let mut text = tag.children().filter(|child| child.is_text()).filter_map(|child| child.text());
+    let mut text = tag.children.iter().filter_map(|child| match child {
+        craft_xml::Node::Text(text) | craft_xml::Node::CData(text) => Some(text.as_str()),
+        _ => None,
+    });
     let first = text.next()?;
     let Some(second) = text.next() else { return Some(Cow::Borrowed(first)) };
     let total = text.clone().try_fold(first.len().checked_add(second.len())?, |total, next| total.checked_add(next.len()))?;
@@ -522,13 +524,9 @@ pub(super) fn plain_tag_text<'a>(tag: roxmltree::Node<'a, '_>) -> Option<std::bo
     Some(Cow::Owned(joined))
 }
 
-fn parse_xml<'a>(xml: &'a str, ctl: &photocraft_raster::Interrupt<'_>) -> Result<roxmltree::Document<'a>> {
+fn parse_xml(xml: &str, ctl: &photocraft_raster::Interrupt<'_>) -> Result<craft_xml::El> {
     super::xml_work::admit(xml, "source metadata", super::MAX_METADATA_BYTES, super::MAX_DEPTH, ctl)?;
-    let tree =
-        roxmltree::Document::parse_with_options(xml, roxmltree::ParsingOptions { nodes_limit: 4096, ..Default::default() }).map_err(|error| match error {
-            roxmltree::Error::NodesLimitReached => crate::IoError::Unsupported("source metadata exceeds the bounded XML node allowance".into()),
-            _ => super::invalid(format!("invalid source metadata: {error}")),
-        })?;
+    let tree = super::xml_work::parse_admitted(xml, "source metadata", super::MAX_METADATA_BYTES, super::MAX_DEPTH, 4096)?;
     ctl.check().map_err(|_| crate::IoError::Cancelled)?;
     Ok(tree)
 }

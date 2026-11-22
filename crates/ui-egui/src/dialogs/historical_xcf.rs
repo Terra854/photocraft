@@ -39,27 +39,25 @@ pub(crate) fn show(app: &mut PhotocraftApp, id: u64) {
 }
 
 pub(crate) fn validate(app: &PhotocraftApp, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or("missing historical XCF source identity")?;
-    let held = app.historical_opens.iter().find(|held| held.id == id).ok_or("historical XCF dialog is stale or out of order")?;
+    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or(tl!("missing historical XCF source identity"))?;
+    let held = app.historical_opens.iter().find(|held| held.id == id).ok_or(tl!("historical XCF dialog is stale or out of order"))?;
     if app.prompt_order.front() != Some(&PromptKind::Historical(id)) {
-        return Err("historical XCF dialog is stale or out of order".into());
+        return Err(tl!("historical XCF dialog is stale or out of order").into());
     }
     if held.place.is_some() {
-        app.session.validate_historical_xcf_place(id).map_err(|error| error.to_string())?;
+        app.session.validate_historical_xcf_place(id).map_err(|_| tl!("The historical XCF placement is no longer valid. Drop the file again."))?;
         if app.ui.transform.is_some() || app.transform_preparing.is_some() || app.jobs.place.is_some() {
-            return Err("Finish the current placement or transform first".into());
+            return Err(tl!("Finish the current placement or transform first").into());
         }
     }
-    photocraft_engine::file_cmds::historical_xcf_sample_order(&Value::Object(fields.clone()), "file.open")
-        .map_err(|error| error.to_string())?
-        .ok_or("choose Little-endian or Big-endian, or Cancel")?;
+    super::historical_sample_order::selected_order(fields, "file.open")?;
     Ok(())
 }
 
 pub(crate) fn answer(app: &mut PhotocraftApp, fields: &serde_json::Map<String, Value>, accept: bool) -> Result<Value, String> {
-    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or("missing historical XCF source identity")?;
+    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or(tl!("missing historical XCF source identity"))?;
     if app.prompt_order.front() != Some(&PromptKind::Historical(id)) {
-        return Err("historical XCF dialog is stale or out of order".into());
+        return Err(tl!("historical XCF dialog is stale or out of order").into());
     }
     if !accept {
         app.session.cancel_historical_xcf_open(id);
@@ -71,9 +69,7 @@ pub(crate) fn answer(app: &mut PhotocraftApp, fields: &serde_json::Map<String, V
         return Ok(json!({"cancelled":true}));
     }
     validate(app, fields)?;
-    let order = photocraft_engine::file_cmds::historical_xcf_sample_order(&Value::Object(fields.clone()), "file.open")
-        .map_err(|error| error.to_string())?
-        .ok_or("choose Little-endian or Big-endian, or Cancel")?;
+    let order = super::historical_sample_order::selected_order(fields, "file.open")?;
     if let Some((doc, name)) = app.historical_opens.iter().find(|held| held.id == id).and_then(|held| held.place.map(|doc| (doc, held.name.clone()))) {
         return resume_place(app, id, doc, &name, order);
     }
@@ -85,14 +81,14 @@ pub(crate) fn answer(app: &mut PhotocraftApp, fields: &serde_json::Map<String, V
     let started = app.session.resume_historical_xcf_open(id, order, background).map_err(|error| error.to_string());
     match started {
         Ok(Started::Job(job)) => {
-            let held = app.historical_opens.iter_mut().find(|held| held.id == id).ok_or("historical source is gone")?;
+            let held = app.historical_opens.iter_mut().find(|held| held.id == id).ok_or(tl!("historical source is gone"))?;
             held.job = Some(job);
             let tab = crate::jobs_ui::OpenTab { job, name: held.name.clone(), path: held.path.clone(), slot: held.slot, order: held.order };
             crate::jobs_ui::track_open(app, tab);
             Ok(json!({"job":job.0}))
         }
         Ok(Started::Done(value)) => {
-            let held = app.historical_opens.iter().find(|held| held.id == id).ok_or("historical source is gone")?;
+            let held = app.historical_opens.iter().find(|held| held.id == id).ok_or(tl!("historical source is gone"))?;
             let (name, path, slot, order) = (held.name.clone(), held.path.clone(), held.slot, held.order);
             let result = crate::jobs_ui::finish_open_with_held(app, &name, path.as_deref(), &value, slot, order);
             complete(app, id, result.as_ref().ok().copied().flatten());

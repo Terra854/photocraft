@@ -34,6 +34,7 @@ pub(crate) struct PlaceSteps {
     /// Where the placed image lands, known once it is decoded.
     plan: Plan,
     warnings: Vec<String>,
+    historical_xcf_sample_order: Option<photocraft_io::HistoricalXcfSampleOrder>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -66,7 +67,7 @@ impl PlaceSteps {
     /// `fine` cuts the work into pieces of a few milliseconds, as a session without worker
     /// threads needs; without it each stage is one unit of work.
     pub(crate) fn new(input: PlaceInput, fine: bool) -> Self {
-        Self { input, bytes: Arc::new(Vec::new()), fine, stage: Stage::Decode, plan: Plan::default(), warnings: Vec::new() }
+        Self { input, bytes: Arc::new(Vec::new()), fine, stage: Stage::Decode, plan: Plan::default(), warnings: Vec::new(), historical_xcf_sample_order: None }
     }
 
     /// An import error as the engine reports it: a cancel stays one and a refused memory budget
@@ -192,6 +193,7 @@ impl PlaceSteps {
             )));
         }
         self.warnings = imported.warnings;
+        self.historical_xcf_sample_order = imported.historical_xcf_sample_order;
         let src = imported.document;
         let (w, h) = (src.size.width as f64, src.size.height as f64);
         let (cw, ch) = self.input.canvas;
@@ -295,11 +297,7 @@ impl PlaceSteps {
                 None => SmartSource::Embedded { file_name: file_name(&input.name), bytes: Arc::clone(&self.bytes) },
             };
             let mut so = SmartObject::new(source, placement, px);
-            so.historical_xcf_sample_order = ctx
-                .stage(0.95, 1., "Placing", |ctl| {
-                    photocraft_io::applicable_historical_xcf_sample_order(&input.name, &self.bytes, input.opts.historical_xcf_sample_order, ctl)
-                })
-                .map_err(|error| self.io_error(error))?;
+            so.historical_xcf_sample_order = self.historical_xcf_sample_order;
             if let Some(path) = input.linked.as_deref()
                 && so.historical_xcf_sample_order.is_some()
             {

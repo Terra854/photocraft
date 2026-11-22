@@ -39,12 +39,12 @@ impl Action {
         match self {
             Self::Replace(target) | Self::Relink(target) | Self::Edit(target) => check(app, target),
             Self::Place { doc, layer, revision, .. } => {
-                let state = app.session.documents().iter().find(|state| state.doc.id == doc).ok_or("the placement document was closed")?;
+                let state = app.session.documents().iter().find(|state| state.doc.id == doc).ok_or(tl!("the placement document was closed"))?;
                 if app.ui.transform.is_some() {
-                    return Err("Commit or cancel the transform first".into());
+                    return Err(tl!("Commit or cancel the transform first").into());
                 }
                 if state.revision != revision || state.active_layer != layer {
-                    return Err("the placement target changed; pick the file again".into());
+                    return Err(tl!("the placement target changed; pick the file again").into());
                 }
                 Ok(())
             }
@@ -121,14 +121,14 @@ pub(crate) fn prompt_edit(
 }
 
 fn check(app: &PhotocraftApp, target: Target) -> Result<(), String> {
-    let state = app.session.documents().iter().find(|state| state.doc.id == target.doc).ok_or("the replacement document was closed")?;
+    let state = app.session.documents().iter().find(|state| state.doc.id == target.doc).ok_or(tl!("the replacement document was closed"))?;
     let Some(LayerContent::Smart(smart)) = state.doc.layer(target.layer).map(|layer| &layer.content) else {
-        return Err("the replacement target is no longer a smart object".into());
+        return Err(tl!("the replacement target is no longer a smart object").into());
     };
     // FIFO processing does not renew permission to overwrite a changed target. An
     // earlier accepted replacement makes later picks stale; cancelling it does not.
     if state.revision != target.revision || smart.contents_id != target.contents {
-        return Err("the replacement target changed; pick its contents again".into());
+        return Err(tl!("the replacement target changed; pick its contents again").into());
     }
     Ok(())
 }
@@ -172,7 +172,7 @@ pub(crate) fn pick_relink(app: &mut PhotocraftApp, target: Target, path: String,
 }
 
 pub(crate) fn pick_place(app: &mut PhotocraftApp, doc: DocId, name: String, bytes: Vec<u8>, linked: bool) -> Result<Value, String> {
-    let state = app.session.documents().iter().find(|state| state.doc.id == doc).ok_or("the placement document was closed")?;
+    let state = app.session.documents().iter().find(|state| state.doc.id == doc).ok_or(tl!("the placement document was closed"))?;
     let action = Action::Place { doc, layer: state.active_layer, revision: state.revision, linked };
     pick_source(app, action, name, bytes, false)
 }
@@ -264,7 +264,7 @@ fn finish_probe(app: &mut PhotocraftApp, id: u64, value: &Value) -> Result<(), S
         }),
         None => return Err("missing replacement header result".into()),
     };
-    let position = app.historical_replacements.held.iter().position(|held| held.id == id).ok_or("replacement source is gone")?;
+    let position = app.historical_replacements.held.iter().position(|held| held.id == id).ok_or(tl!("replacement source is gone"))?;
     app.historical_replacements.held[position].action.check(app)?;
     if let Some(question) = question {
         let held = &mut app.historical_replacements.held[position];
@@ -420,36 +420,34 @@ pub(crate) fn show(app: &mut PhotocraftApp, id: u64) {
 }
 
 pub(crate) fn validate(app: &PhotocraftApp, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or("missing replacement source identity")?;
+    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or(tl!("missing replacement source identity"))?;
     if app.prompt_order.front() != Some(&PromptKind::Replacement(id)) {
-        return Err("replacement dialog is stale or out of order".into());
+        return Err(tl!("replacement dialog is stale or out of order").into());
     }
     if app.jobs.place.is_some() {
         return Err(tl!("A file is still being placed; try again when it has finished.").into());
     }
-    let held = app.historical_replacements.held.iter().find(|held| held.id == id).ok_or("replacement source is gone")?;
+    let held = app.historical_replacements.held.iter().find(|held| held.id == id).ok_or(tl!("replacement source is gone"))?;
     if held.job.is_some() || held.question.is_none() {
-        return Err("the replacement header is still being read".into());
+        return Err(tl!("the replacement header is still being read").into());
     }
     held.action.check(app)?;
-    photocraft_engine::file_cmds::historical_xcf_sample_order(&Value::Object(fields.clone()), held.action.command())
-        .map_err(|error| error.to_string())?
-        .ok_or("choose Little-endian or Big-endian, or Cancel")?;
+    super::historical_sample_order::selected_order(fields, held.action.command())?;
     Ok(())
 }
 
 pub(crate) fn answer(app: &mut PhotocraftApp, fields: &serde_json::Map<String, Value>, accept: bool) -> Result<Value, String> {
-    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or("missing replacement source identity")?;
+    let id = fields.get(FIELD).and_then(Value::as_u64).ok_or(tl!("missing replacement source identity"))?;
     if app.prompt_order.front() != Some(&PromptKind::Replacement(id)) {
-        return Err("replacement dialog is stale or out of order".into());
+        return Err(tl!("replacement dialog is stale or out of order").into());
     }
     let order = if accept {
         validate(app, fields)?;
-        photocraft_engine::file_cmds::historical_xcf_sample_order(&Value::Object(fields.clone()), COMMAND).map_err(|error| error.to_string())?
+        Some(super::historical_sample_order::selected_order(fields, COMMAND)?)
     } else {
         None
     };
-    let position = app.historical_replacements.held.iter().position(|held| held.id == id).ok_or("replacement source is gone")?;
+    let position = app.historical_replacements.held.iter().position(|held| held.id == id).ok_or(tl!("replacement source is gone"))?;
     let held = app.historical_replacements.held.remove(position);
     app.prompt_order.pop_front();
     let result = if accept { apply_source(app, held.action, &held.name, held.bytes, order, held.automated) } else { Ok(json!({"cancelled":true})) };

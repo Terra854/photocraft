@@ -160,7 +160,13 @@ fn image(version: u32, sample: Sample, order: Order, gray: bool, compression: u8
 /// Optionally mark the native editable layer active while retaining independently framed historical samples.
 fn image_with_initial_view(version: u32, sample: Sample, order: Order, gray: bool, compression: u8, active: bool) -> Vec<u8> {
     let mut w = Wire { bytes: format!("gimp xcf v{version:03}\0").into_bytes(), wide: version >= 11 };
-    for value in [65, 2, u32::from(gray), sample.precision()] {
+    let precision = if version == 4 {
+        assert!(matches!(sample, Sample::U16));
+        1
+    } else {
+        sample.precision()
+    };
+    for value in [65, 2, u32::from(gray), precision] {
         w.word(value);
     }
     w.property(17, &[compression]);
@@ -242,6 +248,25 @@ fn assert_pixels(document: &Document, sample: Sample, gray: bool) {
     }
 }
 /// Verify both explicit byte orders produce identical native pixels across historical versions, sample widths, models and compression modes.
+#[test]
+fn early_high_depth_versions_require_the_source_order_and_report_it_after_decode() {
+    for version in 4..=6 {
+        for order in [Order::LittleEndian, Order::BigEndian] {
+            for compression in 0..=2 {
+                let bytes = image(version, Sample::U16, order, false, compression);
+                assert!(matches!(
+                    photocraft_io::import("early.xcf", &bytes),
+                    Err(photocraft_io::IoError::HistoricalXcfSampleOrderRequired(question))
+                        if question.version == version && question.bits_per_sample == 16
+                ));
+                let imported = photocraft_io::import_with_options("early.xcf", &bytes, &opts(order)).unwrap();
+                assert_eq!(imported.historical_xcf_sample_order, Some(order));
+                assert_pixels(&imported.document, Sample::U16, false);
+            }
+        }
+    }
+}
+
 #[test]
 fn explicit_sample_order_covers_all_native_widths_roles_compressions_and_tile_edges() {
     for version in [7, 8, 9, 10, 11] {

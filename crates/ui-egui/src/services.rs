@@ -93,7 +93,7 @@ pub type ImportFn = Box<dyn Fn(&str, &[u8], &photocraft_io::ImportOptions) -> Re
 /// Construct an ordinary decoded document for synthetic import-service fixtures.
 #[cfg(test)]
 pub(crate) fn imported((document, warnings): (Document, Vec<String>)) -> photocraft_io::ImportResult {
-    photocraft_io::ImportResult { document, warnings, source_read_only: false, preview_only: false, initial_view: None }
+    photocraft_io::ImportResult { document, warnings, source_read_only: false, preview_only: false, historical_xcf_sample_order: None, initial_view: None }
 }
 
 /// Encoder settings chosen in Export As (the file format comes from the name's extension).

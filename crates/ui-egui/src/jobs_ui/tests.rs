@@ -1245,6 +1245,7 @@ fn native_view_services(doc: photocraft_doc::Document, view: photocraft_io::Nati
                 warnings: Vec::new(),
                 source_read_only: true,
                 preview_only: false,
+                historical_xcf_sample_order: None,
                 initial_view: Some(view.clone()),
             })
         })),

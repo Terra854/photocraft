@@ -577,7 +577,7 @@ pub struct VectorPreview {
     pub svg: Arc<Vec<u8>>,
 }
 
-/// Explicit sample byte order for development XCF7–11 high-depth pixel data.
+/// Explicit sample byte order for development XCF4–11 high-depth pixel data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(rename_all = "kebab-case")]
 pub enum HistoricalXcfSampleOrder {

@@ -109,11 +109,10 @@ fn language_alternatives<'a>(values: &'a [Cow<'_, str>]) -> Option<Vec<(&'a str,
 
 /// Plain source text is already retained separately. Unknown types, structures,
 /// invalid language alternatives and source binary values do not become RDF.
-fn xmp(tree: &roxmltree::Document<'_>) -> Option<String> {
-    let root = tree.root_element();
+fn xmp(root: &craft_xml::El) -> Option<String> {
     let mut groups: BTreeMap<&str, Vec<Cow<'_, str>>> = BTreeMap::new();
-    for tag in root.children().filter(|n| n.has_tag_name("tag")) {
-        if let Some(key) = tag.attribute("name")
+    for tag in root.children(craft_xml::Local("tag")) {
+        if let Some(key) = tag.attr("name")
             && schema(key).is_some()
             && let Some(value) = plain_tag_text(tag)
         {
@@ -131,7 +130,7 @@ fn xmp(tree: &roxmltree::Document<'_>) -> Option<String> {
             continue;
         };
         let (prefix, name) = tail.split_once('.')?;
-        if root.children().filter(|n| n.has_tag_name("namespace") && n.attribute("prefix") == Some(prefix)).any(|n| n.attribute("url") != Some(uri)) {
+        if root.children(craft_xml::Local("namespace")).filter(|n| n.attr("prefix") == Some(prefix)).any(|n| n.attr("url") != Some(uri)) {
             continue;
         }
         if matches!(shape, Shape::Text) && values.len() != 1 {
@@ -212,11 +211,11 @@ pub(super) fn has_exif_directory(raw: &[u8]) -> bool {
     directory.len() >= 2 + usize::from(entries) * 12 + 4
 }
 
-fn exif(tree: &roxmltree::Document<'_>) -> Option<Vec<u8>> {
+fn exif(tree: &craft_xml::El) -> Option<Vec<u8>> {
     let mut fields: BTreeMap<u16, Cow<'_, str>> = BTreeMap::new();
     let mut duplicate = std::collections::BTreeSet::new();
-    for tag in tree.root_element().children().filter(|n| n.has_tag_name("tag")) {
-        let Some(key) = tag.attribute("name") else { continue };
+    for tag in tree.children(craft_xml::Local("tag")) {
+        let Some(key) = tag.attr("name") else { continue };
         let id = match key {
             "Exif.Image.ImageDescription" => 270,
             "Exif.Image.Make" => 271,
@@ -274,7 +273,7 @@ fn exif(tree: &roxmltree::Document<'_>) -> Option<Vec<u8>> {
 
 /// Source packets lack a type registry. Only unambiguous known schema fields
 /// become native packets; existing native raw packets take priority.
-pub(super) fn translate(doc: &mut Document, tree: &roxmltree::Document<'_>, budget: &mut usize) -> (PacketStatus, PacketStatus) {
+pub(super) fn translate(doc: &mut Document, tree: &craft_xml::El, budget: &mut usize) -> (PacketStatus, PacketStatus) {
     let xmp = if doc.metadata.xmp.is_none() {
         retain_packet(xmp(tree), budget, String::len, |packet| doc.metadata.xmp = Some(packet.into()))
     } else {
@@ -322,7 +321,7 @@ mod tests {
     #[test]
     fn native_packets_obey_shared_budget_and_existing_packet_priority() {
         let source = r#"<metadata><tag name="Xmp.xmp.Label">Label</tag><tag name="Exif.Image.Artist">AB</tag></metadata>"#;
-        let tree = roxmltree::Document::parse(source).unwrap();
+        let tree = craft_xml::parse(source.as_bytes()).unwrap();
         let mut doc = Document::new("Metadata", Size::new(1, 1), ColorMode::Rgb, SampleType::U8);
         let mut empty = 0;
         assert_eq!(translate(&mut doc, &tree, &mut empty), (PacketStatus::OverBudget, PacketStatus::OverBudget));
@@ -340,9 +339,9 @@ mod tests {
     fn oversized_escaped_xmp_and_invalid_language_never_create_partial_packets() {
         let value = "&lt;".repeat(MAX_PACKET / 2);
         let xml = format!("<metadata><tag name=\"Xmp.dc.title\">{value}</tag></metadata>");
-        let tree = roxmltree::Document::parse(&xml).unwrap();
+        let tree = craft_xml::parse(xml.as_bytes()).unwrap();
         assert!(xmp(&tree).is_none());
-        let invalid = roxmltree::Document::parse(r#"<metadata><tag name="Xmp.dc.title">lang=&quot;../../bad&quot; Unsafe</tag></metadata>"#).unwrap();
+        let invalid = craft_xml::parse(br#"<metadata><tag name="Xmp.dc.title">lang=&quot;../../bad&quot; Unsafe</tag></metadata>"#).unwrap();
         assert!(xmp(&invalid).is_none());
     }
 }

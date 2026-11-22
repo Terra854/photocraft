@@ -8,8 +8,9 @@ use the same enhanced import in `photocraft-io` (`crates/io/src/xcf.rs`). This a
 
 ## Historical sample byte order
 
-Unmarked XCF versions 7–11 with multi-byte samples require the byte order used when the file was
-saved. Select **Little-endian** or **Big-endian** when desktop Open, Replace Contents, or Relink
+Unmarked XCF versions 4–11 with multi-byte samples require the byte order used when the file was
+saved. GIMP [began writing high-depth samples in network byte order in XCF 12](https://mail.gnome.org/archives/commits-list/2017-September/msg06002.html).
+Select **Little-endian** or **Big-endian** when desktop Open, Replace Contents, or Relink
 to File asks. Edit Contents also asks when an older bundle embeds such a source without a saved
 choice. The chosen order is stored with the Smart Object. Relink keeps the previous choice when
 the source bytes match.

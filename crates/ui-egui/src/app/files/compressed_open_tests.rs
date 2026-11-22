@@ -51,6 +51,7 @@ fn unwrapped_ordinary_open_keeps_the_inline_import_service() {
                     initial_view: None,
                     source_read_only: false,
                     preview_only: false,
+                    historical_xcf_sample_order: None,
                 })
             })),
             ..Default::default()

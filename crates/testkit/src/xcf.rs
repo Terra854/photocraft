@@ -51,7 +51,8 @@ fn rgb16(version: u32, little: bool, name: &[u8], properties: &[u32], samples: [
         }
     }
     let mut wire = Wire { bytes: format!("gimp xcf v{version:03}\0").into_bytes(), wide: version >= 11 };
-    for value in [1, 1, 0, 250, 17, 1] {
+    let precision = if version == 4 { 1 } else { 250 };
+    for value in [1, 1, 0, precision, 17, 1] {
         wire.word(value);
     }
     wire.bytes.push(0); // Uncompressed tile samples.

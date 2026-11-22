@@ -2,7 +2,7 @@
 //!
 //! Precision tables, pointer widths and tile layouts follow the public XCF document:
 //! https://developer.gimp.org/core/standards/xcf/. In particular these tests do not
-//! resolve the explicitly unspecified sample endianness of development XCF7–11.
+//! resolve the explicitly unspecified sample endianness of development XCF4–11.
 
 use super::tests::{TestImage, TestLayer};
 use super::*;
@@ -103,7 +103,8 @@ fn historical_be_tiles_keep_partial_edges_alpha_and_native_storage() {
             source.layers.push(layer);
             source.channels.push(("Historical coverage", coverage_bytes.clone(), false));
             source.channels.push(("Historical selection", coverage_bytes, true));
-            let imported = import("historical-be.xcf", &source.write(), &Interrupt::NONE).unwrap();
+            let imported =
+                import_with_sample_order("historical-be.xcf", &source.write(), Some(crate::HistoricalXcfSampleOrder::BigEndian), &Interrupt::NONE).unwrap();
             let doc = imported.document;
             let rect = Rect::new(-2, 1, 63, 66);
             assert_eq!(doc.depth, encoding.depth(), "v{version}/{precision}");
@@ -161,7 +162,9 @@ fn historical_assigned_colorants_and_sample_encoding_survive_native_persistence(
         let mut layer = TestLayer::rgba("Historical assigned profile", 1, 1, bytes);
         layer.kind = if gray { 3 } else { 1 };
         source.layers.push(layer);
-        let imported = import("historical-profile.xcf", &source.write(), &Interrupt::NONE).unwrap().document;
+        let imported = import_with_sample_order("historical-profile.xcf", &source.write(), Some(crate::HistoricalXcfSampleOrder::BigEndian), &Interrupt::NONE)
+            .unwrap()
+            .document;
         assert_eq!(imported.layers[0].surface().unwrap().read_region(imported.bounds()), expected);
         let profile = Profile::parse(imported.icc_profile.as_ref().unwrap()).unwrap();
         assert_eq!(profile.matrix, builtin.profile().matrix);
@@ -194,8 +197,10 @@ fn ambiguous_development_high_depth_requires_choice_then_keeps_durable_explicit_
     for (version, precision, encoding, ambiguous) in [
         (7, 600, Encoding::Float, true),
         (11, 600, Encoding::Float, true),
-        (6, 500, Encoding::Float, false),
+        (6, 500, Encoding::Float, true),
         (12, 600, Encoding::Float, false),
+        (4, 0, Encoding::Byte, false),
+        (6, 150, Encoding::Byte, false),
         (7, 150, Encoding::Byte, false),
         (11, 150, Encoding::Byte, false),
     ] {

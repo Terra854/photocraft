@@ -11,30 +11,38 @@ fn session() -> Session {
 
 #[test]
 fn historical_sample_order_reaches_both_place_commands_and_open_as_smart_object() {
+    use std::io::Write as _;
+
     let dir = tempfile::tempdir().unwrap();
-    for (little, order) in [(true, "little-endian"), (false, "big-endian")] {
-        let bytes = fixture::historical_pixel(little);
-        let path = dir.path().join(format!("historical-{order}.xcf"));
-        std::fs::write(&path, &bytes).unwrap();
-        for command in ["file.placeEmbedded", "file.placeLinked", "file.openAsSmartObject"] {
-            let mut s = session();
-            s.execute(command, json!({"path":path,"historicalXcfSampleOrder":order})).unwrap();
-            let state = s.active().unwrap();
-            let layer = state.doc.layer(state.active_layer.unwrap()).unwrap();
-            let LayerContent::Smart(smart) = &layer.content else { panic!("smart placement") };
-            let mut pixel = [0.0; 4];
-            smart.cache.as_ref().unwrap().read_pixel(0, 0, &mut pixel);
-            assert_eq!(pixel, [0x1234 as f32 / 65535., 0x4567 as f32 / 65535., 0x89ab as f32 / 65535., 1.], "{command}, {order}");
-            match &smart.source {
-                SmartSource::Embedded { bytes: retained, .. } => assert_eq!(retained.as_slice(), bytes),
-                SmartSource::Linked { path: retained } => assert_eq!(std::path::Path::new(retained), path),
-            }
-            assert_eq!(std::fs::read(&path).unwrap(), bytes, "source is never rewritten");
-            if command == "file.openAsSmartObject" {
-                assert!(state.path.is_none(), "new smart document cannot overwrite its source");
-                assert_eq!(s.documents().len(), 2);
-            } else {
-                assert_eq!(s.documents().len(), 1);
+    use photocraft_io::HistoricalXcfSampleOrder::{BigEndian, LittleEndian};
+    for (little, order) in [(true, LittleEndian), (false, BigEndian)] {
+        let plain = fixture::historical_pixel(little);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&plain).unwrap();
+        for (suffix, bytes) in [("xcf", plain), ("xcf.gz", encoder.finish().unwrap())] {
+            let path = dir.path().join(format!("historical-{order}.{suffix}"));
+            std::fs::write(&path, &bytes).unwrap();
+            for command in ["file.placeEmbedded", "file.placeLinked", "file.openAsSmartObject"] {
+                let mut s = session();
+                s.execute(command, json!({"path":path,"historicalXcfSampleOrder":order})).unwrap();
+                let state = s.active().unwrap();
+                let layer = state.doc.layer(state.active_layer.unwrap()).unwrap();
+                let LayerContent::Smart(smart) = &layer.content else { panic!("smart placement") };
+                assert_eq!(smart.historical_xcf_sample_order, Some(order), "{command}, {suffix}");
+                let mut pixel = [0.0; 4];
+                smart.cache.as_ref().unwrap().read_pixel(0, 0, &mut pixel);
+                assert_eq!(pixel, [0x1234 as f32 / 65535., 0x4567 as f32 / 65535., 0x89ab as f32 / 65535., 1.], "{command}, {order}");
+                match &smart.source {
+                    SmartSource::Embedded { bytes: retained, .. } => assert_eq!(retained.as_slice(), bytes),
+                    SmartSource::Linked { path: retained } => assert_eq!(std::path::Path::new(retained), path),
+                }
+                assert_eq!(std::fs::read(&path).unwrap(), bytes, "source is never rewritten");
+                if command == "file.openAsSmartObject" {
+                    assert!(state.path.is_none(), "new smart document cannot overwrite its source");
+                    assert_eq!(s.documents().len(), 2);
+                } else {
+                    assert_eq!(s.documents().len(), 1);
+                }
             }
         }
     }

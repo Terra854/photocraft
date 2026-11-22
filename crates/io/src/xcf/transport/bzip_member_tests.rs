@@ -49,6 +49,31 @@ fn bzip_multiple_nonempty_blocks_keep_checksums_and_concatenation() {
 }
 
 #[test]
+fn bzip_declared_grade_admits_the_first_block_without_restarting() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut state = 0x1234_abcd_u32;
+    let plain: Vec<u8> = (0..250_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let bytes = crabz2::compress(&plain, crabz2::Level::new(9).unwrap());
+    assert!((CHUNK..900_000).contains(&bytes.len()));
+    let attempts = AtomicUsize::new(0);
+    let abort_retry = || attempts.fetch_add(1, Ordering::Relaxed) >= 1;
+    let mut input = Input { remaining: &bytes, ctl: Interrupt::cancel_only(&abort_retry) };
+    let mut reader = bzip::Reader::new(&mut input);
+    let mut decoded = [0; 30];
+    reader.read_exact(&mut decoded).unwrap();
+    assert_eq!(decoded, plain[..decoded.len()]);
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 #[ignore = "manual subprocess peak-memory comparison; driven by the resource probe"]
 fn bzip_empty_member_resource_probe() {
     use std::io::Write;

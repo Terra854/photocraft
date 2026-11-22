@@ -123,7 +123,7 @@ fn batch_historical_order_reaches_every_multibyte_version_and_preserves_sources(
     for (order, little) in [("little-endian", true), ("big-endian", false)] {
         let input = folder.path().join(order);
         std::fs::create_dir(&input).unwrap();
-        for version in 7..=11 {
+        for version in 4..=11 {
             std::fs::write(input.join(format!("v{version}.xcf")), historical_rgb16(version, little)).unwrap();
         }
         for recursive in [false, true] {
@@ -147,8 +147,8 @@ fn batch_historical_order_reaches_every_multibyte_version_and_preserves_sources(
             }
             let result = invoke(&args);
             assert_eq!(result.code, 0, "{args:?}: {}{}", result.stdout, result.stderr);
-            assert!(result.stdout.contains("5 succeeded, 0 failed"), "{}", result.stdout);
-            for version in 7..=11 {
+            assert!(result.stdout.contains("8 succeeded, 0 failed"), "{}", result.stdout);
+            for version in 4..=11 {
                 let bytes = std::fs::read(output.join(format!("v{version}.pcraft"))).unwrap();
                 let doc = photocraft_format::load_from_bytes(&bytes).unwrap();
                 let pixels = doc.layers[0].surface().unwrap().read_region(photocraft_doc::Rect::new(0, 0, 1, 1));

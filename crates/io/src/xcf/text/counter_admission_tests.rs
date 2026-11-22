@@ -28,22 +28,21 @@ fn common_budget_preserves_style_rejection_order_and_exhausts_only_failed_bucket
 
 #[test]
 fn common_budget_attribute_transaction_preserves_local_and_file_allowances_on_refusal() {
-    let xml = roxmltree::Document::parse("<span a='value'/>").unwrap();
-    let attribute = xml.root_element().attributes().next().unwrap();
-    let bytes = attribute.name().len() + attribute.value().len();
+    let (name, value) = ("a", "value");
+    let bytes = name.len() + value.len();
     let mut file = attributes(2, bytes - 1, 17);
     let mut work = MarkupWork { visits_left: 2, bytes_left: bytes, shared: Some(&mut file) };
-    let error = charge_markup_attribute(&attribute, &mut work).unwrap_err();
+    let error = charge_markup_attribute(name, value, &mut work).unwrap_err();
     assert!(error.to_string().contains("document text attribute-byte work allowance"));
     assert_eq!((work.visits_left, work.bytes_left), (2, bytes));
     let shared = work.shared.as_mut().unwrap();
     assert_eq!((shared.visits_left, shared.bytes_left, shared.copies_left), (2, bytes - 1, 17));
     shared.bytes_left = bytes;
-    charge_markup_attribute(&attribute, &mut work).unwrap();
+    charge_markup_attribute(name, value, &mut work).unwrap();
     assert_eq!((work.visits_left, work.bytes_left), (1, 0));
     let shared = work.shared.as_ref().unwrap();
     assert_eq!((shared.visits_left, shared.bytes_left, shared.copies_left), (1, 0, 17));
-    let error = charge_markup_attribute(&attribute, &mut work).unwrap_err();
+    let error = charge_markup_attribute(name, value, &mut work).unwrap_err();
     assert!(error.to_string().contains("source text markup exceeds the bounded attribute-byte allowance"));
     assert_eq!((work.visits_left, work.bytes_left), (1, 0));
     let shared = work.shared.as_ref().unwrap();

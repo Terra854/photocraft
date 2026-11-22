@@ -60,7 +60,7 @@ pub struct OpenParams {
     /// Explicitly approve high-memory PSD/PSB imports that fit within the hard memory budget.
     #[serde(default)]
     pub approve_high_memory: bool,
-    /// Explicit order for ambiguous XCF 7–11 samples: little-endian or big-endian. No default is inferred.
+    /// Explicit order for ambiguous XCF 4–11 samples: little-endian or big-endian. No default is inferred.
     #[serde(default)]
     pub historical_xcf_sample_order: Option<String>,
 }
@@ -85,7 +85,7 @@ pub struct PlaceParams {
     /// Explicitly approve high-memory PSD/PSB imports that fit within the hard memory budget.
     #[serde(default)]
     pub approve_high_memory: bool,
-    /// Explicit order for ambiguous high-depth XCF 7–11 samples, little-endian or big-endian.
+    /// Explicit order for ambiguous high-depth XCF 4–11 samples, little-endian or big-endian.
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub historical_xcf_sample_order: Option<photocraft_doc::HistoricalXcfSampleOrder>,
@@ -103,7 +103,7 @@ pub struct ReplaceSmartObjectParams {
     /// The Smart Object layer: an id or a name (default: the active layer).
     #[serde(default)]
     pub layer: Option<Value>,
-    /// Explicit order for ambiguous high-depth XCF 7–11 samples, little-endian or big-endian.
+    /// Explicit order for ambiguous high-depth XCF 4–11 samples, little-endian or big-endian.
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub historical_xcf_sample_order: Option<photocraft_doc::HistoricalXcfSampleOrder>,

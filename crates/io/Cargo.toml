@@ -58,7 +58,6 @@ flate2 = { workspace = true }
 crabz2 = { workspace = true }
 lzma-rust2 = { workspace = true }
 # Native XCF text/metadata uses the bounded borrowed DOM; shared XML owns its DOM.
-roxmltree = { workspace = true }
 # flat.rs reads a palette PNG's pixel indices (Color Table, #14342). The png 0.18 that
 # craft-image-codecs already links; naming it adds no crate to the graph.
 png = "0.18"

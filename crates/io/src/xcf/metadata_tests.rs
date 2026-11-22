@@ -81,8 +81,8 @@ fn metadata_xml_admission_preserves_pixels_and_reports_skipped_tags() {
         (with_attributes(256), None),
         (with_attributes(257), Some("attribute-parse")),
         (with_namespaces, Some("namespace-parse")),
-        (with_equals, Some("parser reservation")),
-        (with_comment, Some("parser reservation")),
+        (with_equals, None),
+        (with_comment, None),
     ] {
         let mut image = TestImage::rgb8(1, 1);
         image.layers.push(TestLayer::rgba("Saved pixels", 1, 1, vec![17, 31, 57, 255]));
@@ -337,33 +337,21 @@ fn source_xmp_schemas_become_native_rdf_arrays_and_language_alternatives() {
     image.image_props.push((21, parasite("gimp-image-metadata", xml)));
     let result = open(&image.write());
     let packet = result.document.metadata.xmp.as_ref().unwrap();
-    let rdf = roxmltree::Document::parse(packet).unwrap();
-    let subject = rdf.descendants().find(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "subject"))).unwrap();
-    assert!(subject.children().any(|node| node.has_tag_name(("http://www.w3.org/1999/02/22-rdf-syntax-ns#", "Bag"))));
-    assert_eq!(
-        subject
-            .descendants()
-            .filter(|node| node.has_tag_name(("http://www.w3.org/1999/02/22-rdf-syntax-ns#", "li")))
-            .filter_map(|node| node.text())
-            .collect::<Vec<_>>(),
-        vec!["first & second", "third"]
-    );
-    let title = rdf.descendants().find(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "title"))).unwrap();
-    let rdf_ns = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
-    let creator = rdf.descendants().find(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "creator"))).unwrap();
-    let creator_seq = creator.children().find(|node| node.has_tag_name((rdf_ns, "Seq"))).unwrap();
-    assert_eq!(
-        creator_seq.children().filter(|node| node.has_tag_name((rdf_ns, "li"))).filter_map(|node| node.text()).collect::<Vec<_>>(),
-        ["Author one", "Author two"]
-    );
-    let title_alt = title.children().find(|node| node.has_tag_name((rdf_ns, "Alt"))).unwrap();
-    let alternatives = title_alt
-        .children()
-        .filter(|node| node.has_tag_name((rdf_ns, "li")))
-        .filter_map(|node| Some((node.attribute(("http://www.w3.org/XML/1998/namespace", "lang"))?, node.text()?)))
-        .collect::<Vec<_>>();
-    assert!(alternatives.contains(&("x-default", "A < B")));
-    assert!(alternatives.contains(&("de-DE", "Titel")));
+    let canonical = craft_xml::Canonical::new(&[
+        ("dc", "http://purl.org/dc/elements/1.1/"),
+        ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+        ("xml", craft_xml::XML_NS),
+    ]);
+    let rdf = craft_xml::Options::canonical(&canonical).strict().parse(packet.as_bytes()).unwrap();
+    let subject = rdf.find("dc:subject").unwrap();
+    assert!(subject.child("rdf:Bag").is_some());
+    assert_eq!(subject.find_all("rdf:li").map(craft_xml::El::text).collect::<Vec<_>>(), ["first & second", "third"]);
+    let creator_seq = rdf.find("dc:creator").unwrap().child("rdf:Seq").unwrap();
+    assert_eq!(creator_seq.children("rdf:li").map(craft_xml::El::text).collect::<Vec<_>>(), ["Author one", "Author two"]);
+    let title_alt = rdf.find("dc:title").unwrap().child("rdf:Alt").unwrap();
+    let alternatives = title_alt.children("rdf:li").filter_map(|node| Some((node.attr("xml:lang")?, node.text()))).collect::<Vec<_>>();
+    assert!(alternatives.iter().any(|(lang, text)| *lang == "x-default" && text == "A < B"));
+    assert!(alternatives.iter().any(|(lang, text)| *lang == "de-DE" && text == "Titel"));
     assert_eq!(alternatives.len(), 2);
     assert!(!packet.contains("never interpreted"));
     let native = photocraft_format::save_to_bytes(&result.document, &Default::default()).unwrap();

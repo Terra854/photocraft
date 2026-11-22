@@ -7,6 +7,7 @@ pub(super) struct Reader<'read, 'bytes, 'ctl> {
     input: &'read mut Input<'bytes, 'ctl>,
     decoder: crabz2::BlockDecoder,
     window: usize,
+    block_window: usize,
     output: Vec<u8>,
     position: usize,
     done: bool,
@@ -14,7 +15,7 @@ pub(super) struct Reader<'read, 'bytes, 'ctl> {
 
 impl<'read, 'bytes, 'ctl> Reader<'read, 'bytes, 'ctl> {
     pub(super) fn new(input: &'read mut Input<'bytes, 'ctl>) -> Self {
-        Self { input, decoder: crabz2::BlockDecoder::new(), window: 0, output: Vec::new(), position: 0, done: false }
+        Self { input, decoder: crabz2::BlockDecoder::new(), window: 0, block_window: CHUNK, output: Vec::new(), position: 0, done: false }
     }
 
     /// Restart only the uncommitted block with a larger borrowed window. Commit/rebase
@@ -25,7 +26,12 @@ impl<'read, 'bytes, 'ctl> Reader<'read, 'bytes, 'ctl> {
             self.input.ctl.check().map_err(io::Error::other)?;
             self.output.clear();
             self.position = 0;
-            let available = self.window.min(self.input.remaining.len());
+            // BZh's grade gives the nominal block size. It is only a window
+            // hint: some compressed blocks need more bytes, so keep the retry.
+            if let Some(&grade @ b'1'..=b'9') = self.input.remaining.strip_prefix(b"BZh").and_then(|header| header.first()) {
+                self.block_window = usize::from(grade - b'0') * 100_000;
+            }
+            let available = self.window.max(self.block_window).min(self.input.remaining.len());
             let bytes = self.input.remaining.get(..available).ok_or_else(|| io::Error::other("invalid bzip2 input window"))?;
             let step = self.decoder.next_block(bytes, &mut self.output);
             let consumed = self.decoder.consumed();
@@ -47,7 +53,7 @@ impl<'read, 'bytes, 'ctl> Reader<'read, 'bytes, 'ctl> {
             }
             // Doubling uncommitted input avoids repeatedly decoding a large block
             // in tiny increments; every byte still borrows the admitted source slice.
-            self.window = self.window.saturating_add(self.window.max(CHUNK)).min(self.input.remaining.len());
+            self.window = self.window.saturating_add(available.max(CHUNK)).min(self.input.remaining.len());
         }
         Ok(false)
     }

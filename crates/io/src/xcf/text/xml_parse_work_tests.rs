@@ -13,12 +13,8 @@ fn attributes(count: usize) -> String {
 fn parsed_elements(markup: &str, calls: &Cell<usize>) -> Result<usize> {
     parse_markup_with(markup, &photocraft_raster::Interrupt::NONE, |source| {
         calls.set(calls.get() + 1);
-        let xml = roxmltree::Document::parse_with_options(
-            source,
-            roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_NODES as u32, ..Default::default() },
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-        Ok(xml.descendants().filter(roxmltree::Node::is_element).count())
+        let xml = super::super::xml_work::parse_admitted(source, "source text markup", super::super::MAX_STRING, MAX_DEPTH, MAX_NODES)?;
+        Ok(1 + xml.descendants().count())
     })
 }
 
@@ -84,6 +80,27 @@ fn quoted_markers_comments_and_cdata_do_not_inflate_xml_work() {
     assert!(!craft_svg::guard::too_wide(&quoted, 256, 1 << 20));
     assert!(!craft_svg::guard::deeper_than(&quoted, MAX_DEPTH));
     assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn shared_xml_preserves_strict_namespaces_and_character_data() {
+    let calls = Cell::new(0);
+    for malformed in [
+        "<markup><p:span>x</p:span></markup>",
+        "<markup xmlns:p='urn:x' xmlns:q='urn:x'><span p:value='x' q:value='y'/></markup>",
+        "<markup xmlns:p=''><p:span>x</p:span></markup>",
+        "<markup><span title='<bad'/>x</markup>",
+        "<markup><!-- bad--comment -->x</markup>",
+        "<markup>]]></markup>",
+        "<markup>&#1;</markup>",
+    ] {
+        assert!(parsed_elements(malformed, &calls).is_err(), "{malformed}");
+    }
+    assert_eq!(calls.get(), 0);
+    let markup = "<markup><b>A&amp;B<![CDATA[<C>]]></b><i>now</i> later</markup>";
+    let (text, runs) = markup_runs(markup, &CharStyle::default(), &HashMap::new(), 72., &mut Vec::new()).unwrap();
+    assert_eq!(text, "A&B<C>now later");
+    assert_eq!(runs.iter().map(|run| (run.len, run.style.weight, run.style.italic)).collect::<Vec<_>>(), [(6, 700, false), (3, 400, true), (6, 400, false)]);
 }
 
 #[test]
@@ -169,7 +186,7 @@ fn cancellation_prevents_dom_parse_and_interrupts_the_style_walk() {
     let ctl = photocraft_raster::Interrupt::cancel_only(&count);
     parse_markup_with(markup, &ctl, |_| Ok(())).unwrap();
     let before_walk = polls.swap(0, Relaxed);
-    let stop = || polls.fetch_add(1, Relaxed) >= before_walk + 3;
+    let stop = || polls.fetch_add(1, Relaxed) >= before_walk + 5;
     let ctl = photocraft_raster::Interrupt::cancel_only(&stop);
     let mut work = MarkupWork::new();
     let initial_visits = work.visits_left;

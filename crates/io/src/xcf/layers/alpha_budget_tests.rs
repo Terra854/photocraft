@@ -19,14 +19,14 @@ fn hierarchy_emits_opaque_alpha_in_its_only_sample_allocation() {
         let required = expected.len() * std::mem::size_of::<f32>();
         let mut exact = image(&bytes, required, base_type, Precision::GAMMA8);
         exact.colormap = colormap.clone();
-        let decoded = exact.hierarchy_with_alpha(pointer, source_channels, false, true, &Interrupt::NONE).unwrap();
+        let decoded = exact.decode_hierarchy(pointer, source_channels, false, true, None, &Interrupt::NONE).unwrap();
         assert_eq!(decoded.data, expected);
         assert_eq!(decoded.channels, if base_type == 1 { 2 } else { 4 });
         assert_eq!(exact.budget, 0, "no transient second color buffer is admitted");
         assert_eq!(decoded.palette_fallback, base_type == 2);
         let mut short = image(&bytes, required - 1, base_type, Precision::GAMMA8);
         short.colormap = colormap;
-        assert!(short.hierarchy_with_alpha(pointer, source_channels, false, true, &Interrupt::NONE).is_err());
+        assert!(short.decode_hierarchy(pointer, source_channels, false, true, None, &Interrupt::NONE).is_err());
         assert_eq!(short.budget, required - 1);
     }
 }
@@ -39,14 +39,14 @@ fn hierarchy_alpha_synthesis_checks_layout_and_cancellation_without_clamping_hdr
     let pointer = hierarchy(&mut writer, 2, 1, 12, &data, Compression::None);
     let bytes = writer.out;
     let mut hdr = image(&bytes, 32, 0, Precision::from_header(11, 650).unwrap());
-    assert_eq!(hdr.hierarchy_with_alpha(pointer, 3, false, true, &Interrupt::NONE).unwrap().data, [-0.25, 3.5, f32::MIN_POSITIVE, 1., 0.75, -2., 7., 1.]);
+    assert_eq!(hdr.decode_hierarchy(pointer, 3, false, true, None, &Interrupt::NONE).unwrap().data, [-0.25, 3.5, f32::MIN_POSITIVE, 1., 0.75, -2., 7., 1.]);
     assert_eq!(hdr.budget, 0);
     for (base_type, channels, coverage) in [(0, 0, false), (0, 4, false), (1, 2, false), (2, 2, false), (0, 3, true)] {
         let mut matching = W { out: vec![0; 4], wide: true };
         let pointer = hierarchy(&mut matching, 1, 1, channels, &vec![57; channels], Compression::None);
         let mut invalid = image(&matching.out, 64, base_type, Precision::GAMMA8);
         assert!(matches!(
-            invalid.hierarchy_with_alpha(pointer, channels, coverage, true, &Interrupt::NONE),
+            invalid.decode_hierarchy(pointer, channels, coverage, true, None, &Interrupt::NONE),
             Err(IoError::Xcf(message)) if message == "opaque alpha synthesis does not match the drawable color layout"
         ));
         assert_eq!(invalid.budget, 64);
@@ -59,7 +59,7 @@ fn hierarchy_alpha_synthesis_checks_layout_and_cancellation_without_clamping_hdr
         }
         malformed.ptr(0);
         let mut decoder = image(&malformed.out, 64, 0, Precision::from_header(11, 650).unwrap());
-        assert!(decoder.hierarchy_with_alpha(at, 3, false, true, &Interrupt::NONE).is_err());
+        assert!(decoder.decode_hierarchy(at, 3, false, true, None, &Interrupt::NONE).is_err());
         assert_eq!(decoder.budget, 64, "invalid source dimensions or byte layout allocate no samples");
     }
     let checks = AtomicUsize::new(0);
@@ -68,7 +68,7 @@ fn hierarchy_alpha_synthesis_checks_layout_and_cancellation_without_clamping_hdr
         true
     };
     let mut cancelled = image(&bytes, 32, 0, Precision::from_header(11, 650).unwrap());
-    assert!(matches!(cancelled.hierarchy_with_alpha(pointer, 3, false, true, &Interrupt::cancel_only(&cancel)), Err(IoError::Cancelled)));
+    assert!(matches!(cancelled.decode_hierarchy(pointer, 3, false, true, None, &Interrupt::cancel_only(&cancel)), Err(IoError::Cancelled)));
     assert_eq!(cancelled.budget, 32, "cancellation precedes sample admission");
     assert_eq!(checks.load(Ordering::Relaxed), 1);
 }
@@ -222,7 +222,7 @@ fn opaque_f32_24mp_alpha_emission_timing() {
     };
     {
         let mut tight = image(&bytes, native_bytes, 0, precision);
-        let decoded = tight.hierarchy_with_alpha(pointer, 3, false, true, &Interrupt::NONE).unwrap();
+        let decoded = tight.decode_hierarchy(pointer, 3, false, true, None, &Interrupt::NONE).unwrap();
         assert_eq!(tight.budget, 0);
         validate(&decoded);
     }
@@ -239,7 +239,7 @@ fn opaque_f32_24mp_alpha_emission_timing() {
             let mut decoder = image(&bytes, old_peak_bytes, 0, precision);
             let start = std::time::Instant::now();
             let decoded = if new {
-                decoder.hierarchy_with_alpha(pointer, 3, false, true, &Interrupt::NONE).unwrap()
+                decoder.decode_hierarchy(pointer, 3, false, true, None, &Interrupt::NONE).unwrap()
             } else {
                 let rgb = decoder.hierarchy(pointer, 3, false, &Interrupt::NONE).unwrap();
                 old_opaque_expansion(rgb, &mut decoder.budget).unwrap()

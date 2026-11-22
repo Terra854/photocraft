@@ -78,7 +78,6 @@ craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.
 craft-raster-codecs = { git = "https://github.com/storytold/craft-libs", rev = "77c7c62345c1f4213f59a07d9fdc156ecde0b540" }
 crabz2 = { version = "=0.7.0", default-features = false, features = ["std"] }
 lzma-rust2 = { version = "=0.23.0", default-features = false, features = ["std", "xz"] }
-roxmltree = "0.21"
 tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }

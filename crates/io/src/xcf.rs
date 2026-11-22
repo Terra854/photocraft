@@ -303,13 +303,7 @@ impl<'a> Image<'a> {
     /// Reads a hierarchy (`hptr`): the first level's tiles into `channels` floats per pixel,
     /// `source_channels` as stored (indexed images expand to RGB here).
     fn hierarchy(&mut self, hptr: usize, source_channels: usize, coverage: bool, ctl: &Interrupt<'_>) -> Result<Pixels> {
-        self.hierarchy_with_alpha(hptr, source_channels, coverage, false, ctl)
-    }
-
-    /// Decode directly into the final native channel layout. Opaque source layers
-    /// synthesize alpha in this allocation, rather than retaining a second full buffer.
-    fn hierarchy_with_alpha(&mut self, hptr: usize, source_channels: usize, coverage: bool, synthesize_alpha: bool, ctl: &Interrupt<'_>) -> Result<Pixels> {
-        self.decode_hierarchy(hptr, source_channels, coverage, synthesize_alpha, None, ctl)
+        self.decode_hierarchy(hptr, source_channels, coverage, false, None, ctl)
     }
 
     /// Decode through one XCF-sized tile buffer when the caller can write directly
@@ -934,7 +928,7 @@ fn validate_canvas(w: u32, h: u32) -> Result<()> {
 
 /// Returns an explicit byte-order choice request for historically ambiguous high-depth storage.
 fn sample_order_request(version: u32, precision: Precision) -> Result<Option<crate::HistoricalXcfSampleOrderRequest>> {
-    if (7..=11).contains(&version) && precision.bytes > 1 {
+    if (4..=11).contains(&version) && precision.bytes > 1 {
         let bits_per_sample = precision.bytes.checked_mul(8).and_then(|n| u32::try_from(n).ok()).ok_or_else(|| invalid("precision bit count overflows"))?;
         Ok(Some(crate::HistoricalXcfSampleOrderRequest { version, bits_per_sample }))
     } else {
@@ -948,6 +942,7 @@ struct Header {
     width: u32,
     height: u32,
     base_type: u32,
+    mode: ColorMode,
     precision: Precision,
 }
 
@@ -960,14 +955,16 @@ fn read_header(bytes: &[u8]) -> Result<(Cursor<'_>, Header)> {
     c.wide = version >= 11;
     let (width, height, base_type) = (c.u32()?, c.u32()?, c.u32()?);
     validate_canvas(width, height)?;
-    if base_type > 2 {
-        return Err(invalid(format!("unknown image type {base_type}")));
-    }
+    let mode = match base_type {
+        0 | 2 => ColorMode::Rgb,
+        1 => ColorMode::Grayscale,
+        _ => return Err(invalid(format!("unknown image type {base_type}"))),
+    };
     let precision = if version >= 4 { Precision::from_header(version, c.u32()?)? } else { Precision::GAMMA8 };
     if base_type == 2 && precision != Precision::GAMMA8 {
         return Err(invalid("indexed pixels require 8-bit nonlinear integer precision"));
     }
-    Ok((c, Header { version, width, height, base_type, precision }))
+    Ok((c, Header { version, width, height, base_type, mode, precision }))
 }
 
 /// Inspects only the shared fixed header, without decoding document pixels.
@@ -1093,12 +1090,12 @@ fn import_with_sample_order_and_parasite_work(
     ctl: &Interrupt<'_>,
 ) -> Result<ImportResult> {
     ctl.check().map_err(|_| IoError::Cancelled)?;
-    let (mut c, Header { version, width: w, height: h, base_type, precision }) = read_header(bytes)?;
+    let (mut c, Header { version, width: w, height: h, base_type, mode, precision }) = read_header(bytes)?;
     let mut warnings = Warnings::default();
     if version > KNOWN_VERSION {
         warnings.note(&format!("XCF version {version} is newer than this reader (version {KNOWN_VERSION}); unknown parts were skipped"));
     }
-    // Development writers did not define high-depth sample byte order in XCF7–11.
+    // Development writers did not define high-depth sample byte order in XCF versions 4–11.
     // Neither source pixels nor producer names establish the original host order.
     let request = sample_order_request(version, precision)?;
     let historical_sample_order_ambiguous = request.is_some();
@@ -1111,12 +1108,6 @@ fn import_with_sample_order_and_parasite_work(
             "Historical high-depth XCF version {version} has unspecified sample byte order; the explicit {sample_order} choice was used. Verify this choice against the original source"
         ));
     }
-    let mode = match base_type {
-        0 => ColorMode::Rgb,
-        1 => ColorMode::Grayscale,
-        2 => ColorMode::Rgb,
-        t => return Err(invalid(format!("unknown image type {t}"))),
-    };
     let depth = precision.depth();
     if base_type == 2 {
         warnings.note("the indexed image opens as RGB");
@@ -1316,7 +1307,14 @@ fn import_with_sample_order_and_parasite_work(
     }
     document.metadata.import_conversion = Some(Arc::new(image.outcomes.finish()?));
     ctl.progress(1.0);
-    Ok(ImportResult { initial_view, document, warnings: image.warnings.finish(), source_read_only: true, preview_only: false })
+    Ok(ImportResult {
+        initial_view,
+        document,
+        warnings: image.warnings.finish(),
+        source_read_only: true,
+        preview_only: false,
+        historical_xcf_sample_order: historical_sample_order_ambiguous.then_some(sample_order),
+    })
 }
 
 /// Preserve the existing implicit-profile fallback when final ICC selection is unknown.

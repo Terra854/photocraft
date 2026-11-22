@@ -22,6 +22,7 @@ fn app_with() -> (Box<PhotocraftApp>, Arc<ScriptedFiles>) {
                 source_read_only: false,
                 initial_view: None,
                 preview_only: false,
+                historical_xcf_sample_order: None,
             })
         })),
         files: Some(files.clone()),

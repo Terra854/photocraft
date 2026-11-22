@@ -1239,18 +1239,14 @@ fn font_resource_copy_bytes(font: &CharStyle) -> usize {
     font.font_family.capacity().saturating_add(font.font_style.capacity()).saturating_add(font.postscript_name.as_ref().map_or(0, String::capacity))
 }
 
-fn charge_markup_attribute(attribute: &roxmltree::Attribute<'_, '_>, work: &mut MarkupWork<'_>) -> Result<()> {
+fn charge_markup_attribute(name: &str, value: &str, work: &mut MarkupWork<'_>) -> Result<()> {
     // Preserve visit-before-byte-overflow rejection order, without spending it yet.
     if !WorkBudget::new(&mut work.visits_left).can_charge(1) {
         return Err(crate::IoError::Unsupported("source text markup exceeds the bounded attribute-visit allowance".into()));
     }
     // Pay before font-map hashing, font parsing, style copies or diagnostics.
     // The second pass pays again for applying/formatting the same attribute.
-    let bytes = attribute
-        .name()
-        .len()
-        .checked_add(attribute.value().len())
-        .ok_or_else(|| crate::IoError::Unsupported("source text markup attribute byte-work overflows".into()))?;
+    let bytes = name.len().checked_add(value.len()).ok_or_else(|| crate::IoError::Unsupported("source text markup attribute byte-work overflows".into()))?;
     let charged = if let Some(shared) = work.shared.as_mut() {
         charge_all([(&mut work.visits_left, 1), (&mut work.bytes_left, bytes), (&mut shared.visits_left, 1), (&mut shared.bytes_left, bytes)])
     } else {
@@ -1277,22 +1273,22 @@ fn charge_markup_attribute(attribute: &roxmltree::Attribute<'_, '_>, work: &mut 
 
 /// Fold the preparatory namespace/font/face lookups into one charged scan.
 /// Otherwise their repeated `.any`/`.attribute` walks bypass the application budget.
-fn inspect_markup_attributes<'a, 'input: 'a>(ancestor: roxmltree::Node<'a, 'input>, work: &mut MarkupWork<'_>) -> Result<InheritedMarkupAttributes<'a>> {
+fn inspect_markup_attributes<'a>(ancestor: &'a craft_xml::El, work: &mut MarkupWork<'_>) -> Result<InheritedMarkupAttributes<'a>> {
     let unsupported_namespace = || crate::IoError::Unsupported("namespaced markup does not have an admitted native text-formatting meaning".into());
-    if ancestor.tag_name().namespace().is_some() {
+    if ancestor.name.contains(':') {
         return Err(unsupported_namespace());
     }
     let mut font = None;
     let mut description = None;
-    let mut overrides_face = matches!(ancestor.tag_name().name(), "b" | "i" | "tt");
-    for attribute in ancestor.attributes() {
-        charge_markup_attribute(&attribute, work)?;
-        if attribute.namespace().is_some() {
+    let mut overrides_face = matches!(ancestor.name.as_str(), "b" | "i" | "tt");
+    for (name, value) in &ancestor.attrs {
+        charge_markup_attribute(name, value, work)?;
+        if name.contains(':') {
             return Err(unsupported_namespace());
         }
-        match attribute.name() {
-            "font" => font = Some(attribute.value()),
-            "font_desc" => description = Some(attribute.value()),
+        match name.as_str() {
+            "font" => font = Some(value.as_str()),
+            "font_desc" => description = Some(value.as_str()),
             "font_family" | "face" | "weight" | "font_weight" | "style" | "font_style" => overrides_face = true,
             _ => {}
         }
@@ -1351,10 +1347,7 @@ fn markup_runs_with_attribute_allowance(
     work: &mut MarkupWork<'_>,
     ctl: &photocraft_raster::Interrupt<'_>,
 ) -> Result<(String, Vec<TextRun>)> {
-    let xml = parse_markup_with(markup, ctl, |markup| {
-        roxmltree::Document::parse_with_options(markup, roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_NODES as u32, ..Default::default() })
-            .map_err(|e| invalid(format!("invalid source text markup: {e}")))
-    })?;
+    let xml = parse_markup_with(markup, ctl, |markup| super::xml_work::parse_admitted(markup, "source text markup", super::MAX_STRING, MAX_DEPTH, MAX_NODES))?;
     let mut text = String::new();
     let mut runs = Vec::new();
     // A short ancestor style can otherwise multiply a long font name/feature
@@ -1366,9 +1359,23 @@ fn markup_runs_with_attribute_allowance(
             allowance = limit;
         }
     });
-    for node in xml.descendants().filter(roxmltree::Node::is_text) {
+    // Keep child cursors and ancestors together so each nested element is
+    // visited in source order with its original formatting context.
+    let mut ancestors = vec![(&xml, xml.children.iter())];
+    while let Some((_, children)) = ancestors.last_mut() {
         ctl.check().map_err(|_| crate::IoError::Cancelled)?;
-        let value = node.text().unwrap_or("");
+        let Some(node) = children.next() else {
+            ancestors.pop();
+            continue;
+        };
+        let value = match node {
+            craft_xml::Node::El(element) => {
+                ancestors.push((element, element.children.iter()));
+                continue;
+            }
+            craft_xml::Node::Text(value) | craft_xml::Node::CData(value) => value.as_str(),
+            _ => continue,
+        };
         charge_style_copy(style_allocation(base), &mut allowance, work.shared.as_deref_mut())?;
         let mut style = base.clone();
         let mut uppercase = base.caps == Caps::AllCaps;
@@ -1379,14 +1386,10 @@ fn markup_runs_with_attribute_allowance(
         let mut size_scale = 1.0;
         let mut spacing_pt = base.tracking * base.size_pt / 1000.;
         let mut letter_spaced = false;
-        let ancestors: Vec<_> = node.ancestors().filter(roxmltree::Node::is_element).collect();
-        if ancestors.len() > MAX_DEPTH {
-            return Err(invalid("text markup nesting exceeds limit"));
-        }
-        for ancestor in ancestors.iter().rev() {
+        for &(ancestor, _) in &ancestors {
             ctl.check().map_err(|_| crate::IoError::Cancelled)?;
             style.size_pt = unscaled_size;
-            let inherited = inspect_markup_attributes(*ancestor, work)?;
+            let inherited = inspect_markup_attributes(ancestor, work)?;
             if let Some(requested) = inherited.font {
                 if let Some(font) = fonts.get(requested) {
                     charge_style_copy(font_resource_copy_bytes(font), &mut allowance, work.shared.as_deref_mut())?;
@@ -1406,7 +1409,7 @@ fn markup_runs_with_attribute_allowance(
                 // request; an overriding request must not retain the old exact face.
                 style.postscript_name = None;
             }
-            match ancestor.tag_name().name() {
+            match ancestor.name.as_str() {
                 "markup" | "span" => {}
                 "b" => style.weight = 700,
                 "i" => style.italic = true,
@@ -1417,27 +1420,28 @@ fn markup_runs_with_attribute_allowance(
                 "tt" => style.font_family = "monospace".into(),
                 "big" => size_scale *= 1.2,
                 "small" => size_scale /= 1.2,
-                _ => note(notes, format!("Source markup element {} is retained without native formatting", diagnostic_value(ancestor.tag_name().name()))),
+                _ => note(notes, format!("Source markup element {} is retained without native formatting", diagnostic_value(ancestor.name.as_str()))),
             }
             let mut explicit_alpha = None;
-            for a in ancestor.attributes() {
-                charge_markup_attribute(&a, work)?;
-                match a.name() {
+            for (name, value) in &ancestor.attrs {
+                charge_markup_attribute(name, value, work)?;
+                let value = value.as_str();
+                match name.as_str() {
                     "font" | "font_desc" => {}
                     "font_family" | "face" => {
                         // Charge copies even when an inner span replaces the family:
                         // retained-run accounting alone cannot bound inherited copy work.
                         allowance = allowance
-                            .checked_sub(a.value().len())
+                            .checked_sub(value.len())
                             .ok_or_else(|| crate::IoError::Unsupported("native text runs exceed the bounded formatting allowance".into()))?;
-                        style.font_family = a.value().into();
+                        style.font_family = value.into();
                     }
                     "weight" | "font_weight" => {
-                        let normalized = a.value().to_ascii_lowercase().replace('-', "");
+                        let normalized = value.to_ascii_lowercase().replace('-', "");
                         style.weight = if let Some(weight) = named_pango_weight(&normalized) {
                             native_pango_weight(weight, notes)
                         } else {
-                            let weight = a.value().parse::<u16>().map_err(|_| invalid("invalid markup weight"))?;
+                            let weight = value.parse::<u16>().map_err(|_| invalid("invalid markup weight"))?;
                             if weight > 1000 {
                                 return Err(crate::IoError::Unsupported("source numeric font weight needs an explicit native conversion".into()));
                             }
@@ -1448,19 +1452,19 @@ fn markup_runs_with_attribute_allowance(
                         };
                     }
                     "style" | "font_style" => {
-                        style.italic = match a.value() {
+                        style.italic = match value {
                             "normal" => false,
                             "italic" | "oblique" => true,
                             _ => return Err(invalid("invalid markup font style")),
                         }
                     }
-                    "variant" | "font_variant" => match a.value() {
+                    "variant" | "font_variant" => match value {
                         "normal" => variant = Caps::Normal,
                         "small-caps" => variant = Caps::SmallCaps,
-                        _ => note(notes, format!("Source font variant {} remains inert", diagnostic_value(a.value()))),
+                        _ => note(notes, format!("Source font variant {} remains inert", diagnostic_value(value))),
                     },
                     "stretch" | "font_stretch" => {
-                        style.horizontal_scale = match a.value() {
+                        style.horizontal_scale = match value {
                             "ultracondensed" => 0.5,
                             "extracondensed" => 0.625,
                             "condensed" => 0.75,
@@ -1476,13 +1480,13 @@ fn markup_runs_with_attribute_allowance(
                     }
                     // Pango renders both numeric and `pt` rise syntax as device distances.
                     // Font sizes below remain point-valued, unlike these placement distances.
-                    "rise" => style.baseline_shift_pt = device_points(f64::from(pango_points(a.value())?), dpi)?,
+                    "rise" => style.baseline_shift_pt = device_points(f64::from(pango_points(value)?), dpi)?,
                     "letter_spacing" => {
-                        spacing_pt = device_points(f64::from(pango_points(a.value())?), dpi)?;
+                        spacing_pt = device_points(f64::from(pango_points(value)?), dpi)?;
                         letter_spaced = true;
                     }
                     "font_features" => {
-                        for feature in features(a.value())? {
+                        for feature in features(value)? {
                             if let Some(previous) = style.features.iter_mut().find(|previous| previous.tag == feature.tag) {
                                 *previous = feature;
                             } else {
@@ -1494,40 +1498,40 @@ fn markup_runs_with_attribute_allowance(
                         }
                     }
                     "underline" => {
-                        style.underline = match a.value() {
+                        style.underline = match value {
                             "none" => false,
                             "single" => true,
                             "double" | "low" | "error" => {
-                                note(notes, format!("Source {} underline becomes native single underline", a.value()));
+                                note(notes, format!("Source {} underline becomes native single underline", value));
                                 true
                             }
                             _ => return Err(crate::IoError::Unsupported("source underline style requires a native mapping".into())),
                         };
                     }
-                    "text_transform" => match a.value() {
+                    "text_transform" => match value {
                         "none" => uppercase = false,
                         "uppercase" => uppercase = true,
                         _ => {
                             uppercase = false;
-                            note(notes, format!("Source text transform {} remains inert", diagnostic_value(a.value())));
+                            note(notes, format!("Source text transform {} remains inert", diagnostic_value(value)));
                         }
                     },
                     "strikethrough" => {
-                        style.strikethrough = match a.value() {
+                        style.strikethrough = match value {
                             "true" | "yes" | "t" | "y" => true,
                             "false" | "no" | "f" | "n" => false,
                             _ => return Err(invalid("invalid Pango strikethrough value")),
                         };
                     }
                     "foreground" | "fgcolor" | "color" => {
-                        let color = markup_color(a.value())?;
+                        let color = markup_color(value)?;
                         style.color.c = color.c;
                         if color.alpha < 1.0 {
                             style.color.alpha = color.alpha;
                         }
                     }
                     "size" | "font_size" => {
-                        match a.value() {
+                        match value {
                             "xx-small" => size_scale = 1. / (1.2 * 1.2 * 1.2),
                             "x-small" => size_scale = 1. / (1.2 * 1.2),
                             "small" => size_scale = 1. / 1.2,
@@ -1544,15 +1548,15 @@ fn markup_runs_with_attribute_allowance(
                         };
                     }
                     "alpha" | "foreground_alpha" | "fgalpha" => {
-                        let (value, max) = if let Some(value) = a.value().strip_suffix('%') { (value, 100.) } else { (a.value(), 65535.) };
+                        let (value, max) = if let Some(value) = value.strip_suffix('%') { (value, 100.) } else { (value, 65535.) };
                         let alpha = value.parse::<f32>().map_err(|_| invalid("invalid markup alpha"))?;
                         if !alpha.is_finite() || !(0.0..=max).contains(&alpha) {
                             return Err(invalid("markup alpha out of bounds"));
                         }
                         explicit_alpha = Some(alpha / max);
                     }
-                    "lang" => style.language = Some(a.value().replace('_', "-")),
-                    _ => note(notes, format!("Source markup attribute {} is retained without native formatting", diagnostic_value(a.name()))),
+                    "lang" => style.language = Some(value.replace('_', "-")),
+                    _ => note(notes, format!("Source markup attribute {} is retained without native formatting", diagnostic_value(name))),
                 }
             }
             // Explicit opacity overrides an RGBA foreground independently of XML
