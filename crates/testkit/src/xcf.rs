@@ -15,6 +15,11 @@ pub fn modern_pixel(red: u16) -> Vec<u8> {
     rgb16(12, false, b"m\0", &[], [red, 0x5678, 0x9abc, 0xffff])
 }
 
+/// A readable raster with an unrecognized source blend mode and a native approximation.
+pub fn modern_pixel_with_unmapped_blend() -> Vec<u8> {
+    rgb16(12, false, b"m\0", &[7, 4, u32::MAX], [0x1234, 0x5678, 0x9abc, 0xffff])
+}
+
 fn rgb16(version: u32, little: bool, name: &[u8], properties: &[u32], samples: [u16; 4]) -> Vec<u8> {
     struct Wire {
         bytes: Vec<u8>,

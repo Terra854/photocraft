@@ -246,6 +246,20 @@ impl PhotocraftApp {
                 }
             }
         }
+        if id == crate::dialogs::image_processor_ui::COMMAND
+            && let Ok(reply) = &r
+        {
+            let warnings: Vec<String> = reply["notices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|notice| {
+                    let file = notice["file"].as_str().unwrap_or_default();
+                    notice["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).map(move |message| format!("{file}: {message}"))
+                })
+                .collect();
+            notices::io_warnings(self, tl!("Image Processor…").trim_end_matches('…'), &warnings);
+        }
         if suppress_events {
             self.session.edit_prefs(|prefs| prefs.script_events.enabled = true);
         }

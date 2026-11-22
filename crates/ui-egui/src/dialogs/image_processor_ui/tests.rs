@@ -34,6 +34,25 @@ fn ok_with_no_file_type_ticked_keeps_the_dialog() {
 }
 
 #[test]
+fn image_processor_dialog_shows_the_xcf_export_warning() {
+    let (mut app, ctx, id) = open();
+    let input = tempfile::tempdir().unwrap();
+    let path = input.path().join("input.xcf");
+    std::fs::write(&path, crate::historical_xcf_fixture::modern_pixel_with_unmapped_blend()).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    set(&mut app, &ctx, id, "source", json!("folder"));
+    set(&mut app, &ctx, id, "input", json!(input.path()));
+    set(&mut app, &ctx, id, "output", json!(output.path()));
+    set(&mut app, &ctx, id, "jpeg/enabled", json!(false));
+    set(&mut app, &ctx, id, "psd/enabled", json!(true));
+    crate::dialogs::confirm(&mut app, &ctx, id).unwrap();
+    assert!(output.path().join("input.psd").is_file());
+    let lines: Vec<_> = app.ui.notices.iter().flat_map(|notice| notice.lines.iter().map(String::as_str)).collect();
+    assert!(lines.iter().any(|line| line.contains("input.xcf") && line.contains("unknown mode")), "{lines:?}");
+    assert!(lines.iter().any(|line| line.contains("input.psd") && line.contains("retained source configuration")), "{lines:?}");
+}
+
+#[test]
 fn run_dispatches_all_enabled_formats_with_their_own_dimensions() {
     let (mut app, ctx, id) = open();
     let directory = tempfile::tempdir().unwrap();

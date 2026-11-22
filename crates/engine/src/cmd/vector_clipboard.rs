@@ -82,7 +82,7 @@ pub(super) fn validate(s: &Session, p: &Value, in_place: bool) -> Result<[f64; 2
     let state = s.active().ok_or(EngineError::NoDocument)?;
     if s.tools.mask_targeted
         || state.doc.quick_mask.is_some()
-        || state.channel_view.layer_mask.is_some()
+        || crate::mask_view_cmds::editing(state).is_some()
         || state.channel_view.target != crate::channel_cmds::ChannelTarget::Composite
         || !crate::layer_copy_cmds::layered(state.doc.mode)
     {

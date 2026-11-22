@@ -377,11 +377,15 @@ fn repair_palette_boundary(
 
 fn link_length(input: &mut impl PropertyInput, declared: usize, version: Option<u32>, ctl: &photocraft_raster::Interrupt<'_>) -> Result<usize> {
     let repaired = declared + 4;
-    let Some(name_len) = input.peek(4, 4)?.and_then(be_u32).map(|n| n as usize).filter(|n| *n <= MAX_STRING && *n + 16 == repaired) else {
+    if link_wire_length(input, 0, declared, MAX_STRING + 16)? != Some(repaired) {
         return Ok(declared);
-    };
-    if name_len != 0 && !input.peek(8 + name_len - 1, 1)?.is_some_and(|end| end == [0]) {
-        return Ok(declared);
+    }
+    // The next link can itself declare a short length. Its bounded locator
+    // framing identifies the adjacent property even when a shifted list also
+    // reaches a terminator.
+    let limit = input.palette_lookahead_limit();
+    if starts_link(input, repaired, limit)? && !starts_link(input, declared, limit)? {
+        return Ok(repaired);
     }
     let left = property_continuation(input, declared, version.unwrap_or(25), ctl)?;
     let right = property_continuation(input, repaired, version.unwrap_or(25), ctl)?;
@@ -390,6 +394,37 @@ fn link_length(input: &mut impl PropertyInput, declared: usize, version: Option<
     let extend =
         if left_framed != right_framed { right_framed } else { right.end.is_some() && (left.end.is_none() || right.unusual_lengths < left.unusual_lengths) };
     Ok(if extend { repaired } else { declared })
+}
+
+fn starts_link(input: &mut impl PropertyInput, offset: usize, limit: usize) -> Result<bool> {
+    if offset.checked_add(8).is_none_or(|end| end > limit) {
+        return Ok(false);
+    }
+    let Some(header) = input.peek(offset, 8)? else { return Ok(false) };
+    if be_u32(header) != Some(48) {
+        return Ok(false);
+    }
+    let Some(length) = header.get(4..).and_then(be_u32) else { return Ok(false) };
+    Ok(link_wire_length(input, offset + 8, length as usize, limit)?.is_some())
+}
+
+/// The field-sized link record with a bounded locator and room for its declared bytes.
+/// This alone cannot distinguish an undercount from a genuinely absent height.
+fn link_wire_length(input: &mut impl PropertyInput, offset: usize, declared: usize, limit: usize) -> Result<Option<usize>> {
+    if !(12..=MAX_STRING + 16).contains(&declared) || offset.saturating_add(declared) > limit {
+        return Ok(None);
+    }
+    let Some(name_len) = input.peek(offset + 4, 4)?.and_then(be_u32).map(|n| n as usize).filter(|n| *n <= MAX_STRING) else {
+        return Ok(None);
+    };
+    let length = name_len + 16;
+    if declared != length && declared + 4 != length {
+        return Ok(None);
+    }
+    if name_len != 0 && !input.peek(offset + 7 + name_len, 1)?.is_some_and(|end| end == [0]) {
+        return Ok(None);
+    }
+    Ok(Some(length))
 }
 
 #[derive(Default)]

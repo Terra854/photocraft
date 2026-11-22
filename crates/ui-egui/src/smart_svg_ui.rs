@@ -374,7 +374,7 @@ fn safe_to_apply(app: &PhotocraftApp) -> bool {
         && !app.session.tools.mask_targeted
         && app.session.active().is_some_and(|st| {
             st.doc.quick_mask.is_none()
-                && st.channel_view.layer_mask.is_none()
+                && photocraft_engine::mask_view_cmds::editing(st).is_none()
                 && st.channel_view.target == photocraft_engine::channel_cmds::ChannelTarget::Composite
                 && app.session.job_on(st.doc.id).is_none()
         })

@@ -123,7 +123,7 @@ fn enabled(s: &Session) -> std::result::Result<(), String> {
     }
     if s.tools.mask_targeted
         || state.doc.quick_mask.is_some()
-        || state.channel_view.layer_mask.is_some()
+        || crate::mask_view_cmds::editing(state).is_some()
         || state.channel_view.target != crate::channel_cmds::ChannelTarget::Composite
     {
         return Err("SVG contents editing requires the layer composite target".into());

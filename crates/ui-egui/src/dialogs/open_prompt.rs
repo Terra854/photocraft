@@ -2,7 +2,7 @@
 //! A decoded file is held back while its standard, agent-accessible dialog asks what to do.
 //! Damage confirmation comes first; Continue admits the file normally once any profile question
 //! is answered, with no persistent save restriction. Cancelling damage discards just that file;
-//! cancelling a profile question retains its existing behaviour of cancelling the whole queue.
+//! cancelling a profile question cancels the queued document opens and leaves independent Smart Object picks.
 //! Files that finish reading while a prompt is up wait their turn.
 
 use std::sync::Arc;
@@ -118,7 +118,7 @@ pub fn has_open_dialog(app: &PhotocraftApp) -> bool {
 }
 
 /// The result pump (`dialogs::TAKERS`): closes a damage or memory prompt whose file left the queue
-/// (a cancelled profile question drops every queued file), applies the profile prompt's result,
+/// (a cancelled profile question drops the queued opens), applies the profile prompt's result,
 /// then lets the next queued prompt open once the previous one is gone. Each pass drains only
 /// results already stored, so a second pass in one frame finds nothing to apply twice.
 pub(crate) fn take(app: &mut PhotocraftApp, ctx: &egui::Context) {
@@ -290,7 +290,7 @@ fn policy_key(mode: ColorMode) -> Option<&'static str> {
 }
 
 /// The prompt's answer: `Some(action)` (OK) opens the first queued file with it and moves on to
-/// the next; `None` (Cancel) drops every queued file and stops the reads still running.
+/// the next; Cancel drops queued opens and their reads, then advances any independent picks.
 pub fn answer(app: &mut PhotocraftApp, action: Option<&str>) -> Result<Value, String> {
     if action.is_some() && matches!(app.prompt_order.front(), Some(PromptKind::Historical(_) | PromptKind::Resuming(_) | PromptKind::Replacement(_))) {
         return Err("answer the historical XCF choice first".into());
@@ -299,7 +299,7 @@ pub fn answer(app: &mut PhotocraftApp, action: Option<&str>) -> Result<Value, St
         return Err("answer the damaged PSD confirmation first".into());
     }
     let Some(action) = action else {
-        let dropped = app.held_opens.len() + app.held_memory_prompts.len() + app.historical_opens.len() + app.historical_replacements.len();
+        let dropped = app.held_opens.len() + app.held_memory_prompts.len() + app.historical_opens.len();
         let name = app.held_opens.front().map(|h| h.name.clone()).or_else(|| app.held_memory_prompts.front().map(|m| m.name.clone())).unwrap_or_default();
         for m in app.held_memory_prompts.drain(..) {
             app.session.cancel_pending_preflight(m.id);
@@ -307,9 +307,8 @@ pub fn answer(app: &mut PhotocraftApp, action: Option<&str>) -> Result<Value, St
         app.session.clear_pending_preflights();
         super::historical_sample_order::close(app);
         super::historical_xcf::cancel_all(app);
-        super::historical_replace::cancel_all(app);
         app.held_opens.clear();
-        app.prompt_order.clear();
+        app.prompt_order.retain(|kind| matches!(kind, PromptKind::Replacement(_)));
         for job in app.jobs.opens.iter().map(|o| o.job).collect::<Vec<_>>() {
             app.session.cancel_job(job);
         }
@@ -317,6 +316,7 @@ pub fn answer(app: &mut PhotocraftApp, action: Option<&str>) -> Result<Value, St
         app.jobs.batches.clear();
         app.ui.status = crate::i18n::fmt(tl!("Canceled opening {name}"), &[("name", &name)]);
         app.ui.status_error = false;
+        advance(app);
         return Ok(json!({"cancelled": dropped}));
     };
     let Some(held) = app.held_opens.pop_front() else { return Err("no file is waiting to open".into()) };

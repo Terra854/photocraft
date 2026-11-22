@@ -310,3 +310,30 @@ fn owns(fields: &serde_json::Map<String, Value>) -> bool {
 fn can_confirm(fields: &serde_json::Map<String, Value>) -> bool {
     matches!(fields.get("historicalXcfSampleOrder").and_then(Value::as_str), Some("little-endian" | "big-endian"))
 }
+
+#[test]
+fn imported_mask_preview_keeps_the_shells_pixel_target() {
+    let mut session = photocraft_engine::Session::new();
+    session.execute("file.new", json!({"width":2,"height":2,"background":"#ff0000"})).unwrap();
+    session.execute("layer.layerMask.revealAll", json!({})).unwrap();
+    let layer = session.active().unwrap().active_layer.unwrap();
+    session
+        .apply_import_initial_view(Some(photocraft_io::NativeInitialView {
+            selected_layers: vec![layer],
+            active_layer: Some(layer),
+            show_layer_mask: true,
+            ..Default::default()
+        }))
+        .unwrap();
+    let mut app = PhotocraftApp::new(session, crate::Services::default());
+    app.sync_opened_view();
+    assert!(!app.ui.mask_target);
+    assert_eq!(crate::canvas::strokes::paint_target(&app), json!("pixels"));
+    let before = app.session.active().unwrap().doc.layer(layer).unwrap().mask.as_ref().unwrap().surface.clone();
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    let state = app.session.active().unwrap();
+    assert_eq!(photocraft_engine::mask_view_cmds::current(state).unwrap().mode, photocraft_engine::mask_view_cmds::MaskViewMode::Gray);
+    let edited = state.doc.layer(layer).unwrap();
+    assert_eq!(edited.surface().unwrap().pixel(0, 0), [0.0, 1.0, 1.0, 1.0]);
+    assert_eq!(edited.mask.as_ref().unwrap().surface, before);
+}

@@ -587,14 +587,22 @@ impl<'a> Image<'a> {
 
     /// Capture one native layer/mask editing target after its content is available, without persisting view rules.
     pub(super) fn layer_initial_view(&mut self, layer: &Layer, properties: &[Prop<'a>]) {
+        let shown_mask = layer.mask.is_some() && metadata::flag(properties, 13);
         if metadata::active(properties, 2) {
             self.initial_view.selected_layers.push(layer.id);
             if self.initial_view.active_layer.is_none() {
                 self.initial_view.active_layer = Some(layer.id);
-                self.initial_view.show_layer_mask = layer.mask.is_some() && metadata::flag(properties, 13);
+                self.initial_view.show_layer_mask = shown_mask;
                 if layer.mask.is_some() && metadata::flag(properties, 12) {
                     self.initial_view.target = crate::initial_view::NativeImportTarget::LayerMask;
                 }
+            }
+        }
+        if shown_mask {
+            if self.initial_view.active_layer == Some(layer.id) {
+                self.warnings.note("The saved XCF layer-mask preview is shown as grayscale outside the original layer stack");
+            } else {
+                self.warnings.note("A saved XCF layer-mask preview on a non-active layer could not be restored");
             }
         }
     }

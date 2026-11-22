@@ -97,7 +97,7 @@ pub(crate) fn active_filter_target(app: &PhotocraftApp) -> Result<(LayerId, Surf
         // before any work is done in the workspace.
         if let Some(st) = app.session.active()
             && matches!(st.channel_view.target, photocraft_engine::channel_cmds::ChannelTarget::Color(_))
-            && photocraft_engine::mask_view_cmds::current(st).is_none()
+            && photocraft_engine::mask_view_cmds::editing(st).is_none()
             && st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| matches!(l.content, LayerContent::Smart(_)))
         {
             return Err("Rasterize the layer before editing its colour channels".into());

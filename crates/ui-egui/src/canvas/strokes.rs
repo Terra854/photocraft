@@ -842,7 +842,7 @@ pub fn paint_target(app: &PhotocraftApp) -> serde_json::Value {
         ChannelTarget::Composite if st.doc.quick_mask.is_some() => return json!("quickMask"),
         ChannelTarget::LayerMask => return json!("mask"),
         ChannelTarget::Color(_) => {
-            if let Some(view) = photocraft_engine::mask_view_cmds::current(st) {
+            if let Some(view) = photocraft_engine::mask_view_cmds::editing(st) {
                 return json!(if view.filter { "filterMask" } else { "mask" });
             }
             // A colour set edits a raster layer's own pixels. The rows stay selected across layer
@@ -861,7 +861,7 @@ pub fn paint_target(app: &PhotocraftApp) -> serde_json::Value {
     }
     let has_mask = st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| l.mask.is_some());
     // Viewing the mask (⌥-click its thumbnail, #196) paints the mask.
-    let viewing = photocraft_engine::mask_view_cmds::current(st).is_some_and(|v| !v.filter);
+    let viewing = photocraft_engine::mask_view_cmds::editing(st).is_some_and(|v| !v.filter);
     let mask = app.ui.mask_target || viewing || crate::adjustment_layer_active(st);
     json!(if mask && has_mask { "mask" } else { "pixels" })
 }
@@ -871,6 +871,6 @@ pub fn paint_target(app: &PhotocraftApp) -> serde_json::Value {
 pub(crate) fn multiple_color_target(app: &PhotocraftApp) -> bool {
     let Some(st) = app.session.active() else { return false };
     matches!(st.channel_view.target, photocraft_engine::channel_cmds::ChannelTarget::Color(_))
-        && photocraft_engine::mask_view_cmds::current(st).is_none()
+        && photocraft_engine::mask_view_cmds::editing(st).is_none()
         && photocraft_engine::color_channels::selected(&app.session).is_some_and(|colors| colors.len() > 1)
 }

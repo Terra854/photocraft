@@ -404,7 +404,7 @@ fn eyedropper_mask_source(app: &PhotocraftApp) -> Option<(&photocraft_raster::Su
     }
     let st = app.session.active()?;
     // Painting can implicitly edit an adjustment's mask even with its content thumbnail selected.
-    let targeted = app.ui.mask_target || st.channel_view.target == ChannelTarget::LayerMask || mask_view_cmds::current(st).is_some_and(|v| !v.filter);
+    let targeted = app.ui.mask_target || st.channel_view.target == ChannelTarget::LayerMask || mask_view_cmds::editing(st).is_some_and(|v| !v.filter);
     if !targeted || st.doc.quick_mask.is_some() || !app.layer_mask_targeted() {
         return None;
     }

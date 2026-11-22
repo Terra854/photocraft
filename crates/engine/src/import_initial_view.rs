@@ -71,7 +71,12 @@ impl Session {
             st.channel_view.set_alpha_visible(index, true);
         }
         st.channel_view.layer_mask = if view.show_layer_mask {
-            st.active_layer.map(|layer| crate::mask_view_cmds::LayerMaskView { layer, mode: crate::mask_view_cmds::MaskViewMode::Gray, filter: false })
+            st.active_layer.map(|layer| crate::mask_view_cmds::LayerMaskView {
+                layer,
+                mode: crate::mask_view_cmds::MaskViewMode::Gray,
+                filter: false,
+                display_only: true,
+            })
         } else {
             None
         };
@@ -330,6 +335,37 @@ mod initial_view_tests {
         assert_eq!(session.active().unwrap().active_layer, Some(layer), "an empty layer hint preserves the current layer target");
         assert_eq!(session.active().unwrap().selected_layers, vec![layer]);
         assert!(!session.tools.mask_targeted);
+    }
+
+    #[test]
+    fn imported_mask_preview_keeps_pixel_edits_independent_of_its_display() {
+        for (command, params, expected) in [
+            ("image.adjustments.invert", json!({}), [0.0, 1.0, 1.0, 1.0]),
+            ("edit.fill", json!({"contents": "color", "color": "#0000ff"}), [0.0, 0.0, 1.0, 1.0]),
+        ] {
+            let mut session = Session::new();
+            session.execute("file.new", json!({"width":2,"height":2,"background":"#ff0000"})).unwrap();
+            session.execute("layer.layerMask.revealAll", json!({})).unwrap();
+            let layer = session.active().unwrap().active_layer.unwrap();
+            session.execute("edit.fill", json!({"target":"mask","contents":"color","color":"#808080"})).unwrap();
+            let before = session.active().unwrap().doc.layer(layer).unwrap().mask.as_ref().unwrap().surface.clone();
+            assert!((0.0..1.0).contains(&before.sample_channel(0, 0, 0)));
+            session
+                .apply_import_initial_view(Some(NativeInitialView {
+                    active_layer: Some(layer),
+                    selected_layers: vec![layer],
+                    show_layer_mask: true,
+                    ..Default::default()
+                }))
+                .unwrap();
+            assert_eq!(crate::mask_view_cmds::current(session.active().unwrap()).unwrap().mode, crate::mask_view_cmds::MaskViewMode::Gray);
+            session.execute(command, params).unwrap();
+            let state = session.active().unwrap();
+            let edited = state.doc.layer(layer).unwrap();
+            assert_eq!(edited.surface().unwrap().pixel(0, 0), expected, "{command}");
+            assert_eq!(edited.mask.as_ref().unwrap().surface, before, "{command}");
+            assert!(crate::mask_view_cmds::current(state).is_some());
+        }
     }
 
     /// Original XCFv3 image properties: one modern sampler at (2,3), no drawable layers.

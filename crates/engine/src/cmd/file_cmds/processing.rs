@@ -231,6 +231,7 @@ fn image_processor_formats(s: &Session, p: &Value, source: &str, output: &str, o
     };
     let mut files = Vec::new();
     let mut errors = Vec::new();
+    let mut notices = Vec::new();
     for format in formats {
         // The existing runners prepare fresh scratch documents for each output.
         let process = |scratch: &mut Session, out: &str| {
@@ -255,6 +256,9 @@ fn image_processor_formats(s: &Session, p: &Value, source: &str, output: &str, o
         if let Some(Value::Array(written)) = result.get_mut("files").map(Value::take) {
             files.extend(written);
         }
+        if let Some(Value::Array(recorded)) = result.get_mut("notices").map(Value::take) {
+            notices.extend(recorded);
+        }
         if let Some(Value::Array(failed)) = result.get_mut("errors").map(Value::take) {
             errors.extend(failed.into_iter().map(|mut failure| {
                 failure["format"] = json!(format.extension);
@@ -265,7 +269,7 @@ fn image_processor_formats(s: &Session, p: &Value, source: &str, output: &str, o
             }));
         }
     }
-    Ok(json!({"files": files, "errors": errors}))
+    Ok(super::batch_run::process_result(files, errors, notices))
 }
 
 pub(super) fn load_files_into_stack(s: &mut Session, p: &Value) -> Result<Value> {

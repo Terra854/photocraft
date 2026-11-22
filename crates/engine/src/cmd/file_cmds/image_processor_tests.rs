@@ -21,6 +21,45 @@ fn exported(result: &Value, index: usize) -> std::result::Result<Document, Box<d
     Ok(photocraft_io::import(path, &std::fs::read(path)?)?.document)
 }
 
+#[test]
+fn image_processor_reports_xcf_import_and_export_notices_for_folders_and_document_copies() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("saved.xcf");
+    std::fs::write(&path, photocraft_testkit::xcf::modern_pixel_with_unmapped_blend()).unwrap();
+    let mut session = Session::new();
+    for (source, folder) in [("folder", true), ("current", false), ("open", false)] {
+        if source == "current" {
+            session.execute("file.openAs", json!({"path": path})).unwrap();
+        }
+        for single_format in [true, false] {
+            let mut params = json!({"source": source, "input": [path], "output": dir.path().join(format!("{source}-{single_format}"))});
+            if single_format {
+                params["format"] = json!("psd");
+            } else {
+                params["psd"] = json!({"enabled": true});
+            }
+            let result = session.execute("file.scripts.imageProcessor", params).unwrap();
+            assert!(result["errors"].as_array().unwrap().is_empty(), "{result}");
+            let exported = result["files"][0].as_str().unwrap();
+            let notices = result["notices"].as_array().unwrap();
+            assert_eq!(
+                notices.iter().any(|notice| notice["file"] == json!(path)
+                    && notice["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("unknown mode"))),
+                folder,
+                "{result}"
+            );
+            assert!(
+                notices.iter().any(|notice| notice["file"] == exported
+                    && notice["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("retained source configuration"))),
+                "{result}"
+            );
+            let psd = photocraft_io::import(exported, &std::fs::read(exported).unwrap()).unwrap();
+            let pixel = photocraft_compose::flatten(&psd.document).px[0];
+            assert!((pixel[0] - 0x1234 as f32 / 65535.).abs() < 0.002 && pixel[3] == 1.0, "{pixel:?}");
+        }
+    }
+}
+
 /// Resizing must use unsaved pixels at every supported depth while leaving the source
 /// snapshot, selected layers, history, dirty state and saved file intact.
 #[test]

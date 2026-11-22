@@ -276,6 +276,7 @@ fn process_outputs<'a>(
     let authorize = s.authorize;
     let mut files = Vec::new();
     let mut errors = Vec::new();
+    let notices = std::cell::RefCell::new(Vec::new());
     let mut written = OutputClaims::default();
     let run = |scratch: &mut Session, out: &str| {
         // Nested commands answer to the initiating session's authorization hook.
@@ -284,7 +285,7 @@ fn process_outputs<'a>(
         f(scratch, out).map_err(FileFailure::from)
     };
     for (path, out) in outputs {
-        let options = ProcessOptions { format: None, written: (!unique).then_some(&written), ctx: None, input: None, order, unique };
+        let options = ProcessOptions { format: None, written: (!unique).then_some(&written), ctx: None, prepare: None, notices: Some(&notices), order, unique };
         let r = process_one(raw_ppi, path, &out, save, options, &run);
         match r {
             Ok(Some(PublishedOutput { path: out, warning })) => {
@@ -300,7 +301,7 @@ fn process_outputs<'a>(
             Err(error) => errors.push(error.value("file", path)),
         }
     }
-    json!({"files": files, "errors": errors})
+    process_result(files, errors, notices.into_inner())
 }
 
 type PrepareInput<'a> = &'a dyn Fn(&mut Session, &str) -> Result<()>;
@@ -318,6 +319,7 @@ pub(super) fn process_document_copies(
 ) -> Value {
     let mut files = Vec::new();
     let mut errors = Vec::new();
+    let notices = std::cell::RefCell::new(Vec::new());
     let mut written = OutputClaims::default();
     for state in documents {
         // Export resolves stored links against this source, including non-active documents.
@@ -343,10 +345,16 @@ pub(super) fn process_document_copies(
             }
             Ok(())
         };
-        let notices = std::cell::RefCell::new(Vec::new());
-        let input = InputPolicy { prepare: &prepare, notices: &notices };
         let run = |scratch: &mut Session, out: &str| f(scratch, out).map_err(FileFailure::from);
-        let options = ProcessOptions { format: Some(&ext), written: Some(&written), ctx: None, input: Some(&input), order: None, unique: false };
+        let options = ProcessOptions {
+            format: Some(&ext),
+            written: Some(&written),
+            ctx: None,
+            prepare: Some(&prepare),
+            notices: Some(&notices),
+            order: None,
+            unique: false,
+        };
         match process_one(s.prefs().raw_defaults.resolution, &path, &out, save, options, &run) {
             Ok(_) => {
                 written.record(&out, &path);
@@ -355,7 +363,15 @@ pub(super) fn process_document_copies(
             Err(error) => errors.push(error.value("file", &path)),
         }
     }
-    json!({"files": files, "errors": errors})
+    process_result(files, errors, notices.into_inner())
+}
+
+pub(super) fn process_result(files: Vec<impl serde::Serialize>, errors: Vec<Value>, notices: Vec<Value>) -> Value {
+    let mut result = json!({"files": files, "errors": errors});
+    if !notices.is_empty() {
+        result["notices"] = json!(notices);
+    }
+    result
 }
 
 struct InputPolicy<'a> {
@@ -367,7 +383,8 @@ struct ProcessOptions<'a> {
     format: Option<&'a str>,
     written: Option<&'a OutputClaims>,
     ctx: Option<&'a crate::jobs::JobCtx>,
-    input: Option<&'a InputPolicy<'a>>,
+    prepare: Option<PrepareInput<'a>>,
+    notices: Option<&'a std::cell::RefCell<Vec<Value>>>,
     order: Option<photocraft_io::HistoricalXcfSampleOrder>,
     unique: bool,
 }
@@ -387,12 +404,13 @@ fn process_one(
     }
     let mut scratch = Session::new();
     let result = (|| -> std::result::Result<Option<PublishedOutput>, FileFailure> {
-        if let Some(input) = options.input {
-            (input.prepare)(&mut scratch, path)?;
+        if let Some(prepare) = options.prepare {
+            prepare(&mut scratch, path)?;
         } else {
             let bytes = read_file(path)?;
             let opts = photocraft_io::ImportOptions { historical_xcf_sample_order: options.order, ..Default::default() };
             let imported = super::open::import_source_at_raw_ppi(raw_ppi, &file_name(path), &bytes, &opts)?;
+            record_warnings(&mut scratch, path, imported.warnings);
             scratch.add_document(imported.document, Some(path.to_string()));
         }
         if let Some(ctx) = options.ctx {
@@ -414,7 +432,7 @@ fn process_one(
         if options.unique {
             let (bytes, warnings) = encode(&d.doc, out, save)?;
             let actual = save_unique_output(out, &bytes)?;
-            record_export_warnings(&mut scratch, &actual.path, warnings);
+            record_warnings(&mut scratch, &actual.path, warnings);
             return Ok(Some(actual));
         }
         let warnings = if let Some(format) = options.format {
@@ -423,11 +441,11 @@ fn process_one(
         } else {
             save_doc(&d.doc, out, save)?
         };
-        record_export_warnings(&mut scratch, out, warnings);
+        record_warnings(&mut scratch, out, warnings);
         Ok(None)
     })();
-    if let Some(input) = options.input {
-        input.notices.borrow_mut().extend(scratch.batch_open_notices.take().unwrap_or_default());
+    if let (Some(notices), Some(recorded)) = (options.notices, scratch.batch_open_notices.take()) {
+        notices.borrow_mut().extend(recorded);
     }
     result
 }
@@ -482,10 +500,10 @@ fn save_batch_doc(doc: &Document, out: &str, format: &str, save: SaveOpts, ctx: 
     Ok(warnings)
 }
 
-/// Keep encoder diagnostics beside the existing per-file opening notices, including snapshots.
-fn record_export_warnings(scratch: &mut Session, out: &str, warnings: Vec<String>) {
+/// Keep decoder and encoder diagnostics alongside other per-file notices.
+fn record_warnings(scratch: &mut Session, path: &str, warnings: Vec<String>) {
     if !warnings.is_empty() {
-        scratch.batch_open_notices.get_or_insert_with(Vec::new).push(json!({"file": out, "warnings": warnings}));
+        scratch.batch_open_notices.get_or_insert_with(Vec::new).push(json!({"file": path, "warnings": warnings}));
     }
 }
 
@@ -646,7 +664,15 @@ fn process_batch_outputs_with(
             path,
             out,
             save,
-            ProcessOptions { format: Some(format), written: check_duplicates.then_some(&written), ctx: Some(ctx), input, order: None, unique: false },
+            ProcessOptions {
+                format: Some(format),
+                written: check_duplicates.then_some(&written),
+                ctx: Some(ctx),
+                prepare: input.map(|input| input.prepare),
+                notices: input.map(|input| input.notices),
+                order: None,
+                unique: false,
+            },
             f,
         );
         if result.is_ok() {
@@ -1217,7 +1243,7 @@ pub(super) fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                         Some(doc) if scratch.active().is_none_or(|d| d.doc.id != doc.id) => {
                             validate_result(scratch, &doc)?;
                             let warnings = save_batch_doc(&doc, out, &encode_format, save, ctx)?;
-                            record_export_warnings(scratch, out, warnings);
+                            record_warnings(scratch, out, warnings);
                             Ok(true)
                         }
                         _ => {

@@ -70,7 +70,8 @@ pub(crate) struct Pending {
 }
 
 impl Pending {
-    pub(crate) fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.held.len()
     }
     pub(crate) fn is_empty(&self) -> bool {
@@ -304,17 +305,6 @@ pub(crate) fn on_event(app: &mut PhotocraftApp, event: &JobEvent) -> bool {
     }
     crate::open_prompt::advance(app);
     true
-}
-
-pub(crate) fn cancel_all(app: &mut PhotocraftApp) {
-    if let Some(job) = app.historical_replacements.applying.take() {
-        app.session.cancel_job(job);
-    }
-    for held in app.historical_replacements.held.drain(..) {
-        if let Some(job) = held.job {
-            app.session.cancel_job(job);
-        }
-    }
 }
 
 fn owned_bytes(bytes: Arc<Vec<u8>>) -> Vec<u8> {

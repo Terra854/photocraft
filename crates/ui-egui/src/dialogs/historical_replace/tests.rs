@@ -1,5 +1,5 @@
 use super::*;
-use crate::dialogs::historical_sample_order::tests_support::{cancel, confirm, dialogs, set_order};
+use crate::dialogs::historical_sample_order::tests_support::{cancel, confirm, dialogs, profile_id, set_order};
 use craft::host::{Picked, ScriptedFiles};
 use photocraft_doc::{ColorMode, Document, HistoricalXcfSampleOrder, Layer, SampleType, SmartObject, SmartSource};
 use photocraft_geom::{Affine, Size};
@@ -123,6 +123,56 @@ fn tick_probe(app: &mut PhotocraftApp) {
 fn cancel_choice(app: &mut PhotocraftApp) {
     let id = dialogs(app).into_iter().find(|dialog| owns(&dialog.fields)).unwrap().id;
     cancel(app, id).unwrap();
+}
+
+#[test]
+fn cancelling_profile_open_preserves_pending_smart_object_picks() {
+    let png = photocraft_codecs::Image::from_u8(1, 1, photocraft_codecs::ChannelLayout::Rgb, vec![17, 31, 57]).unwrap();
+    let png = photocraft_codecs::encode(&png, photocraft_codecs::Format::Png, &Default::default()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("picked.png");
+    std::fs::write(&path, &png).unwrap();
+
+    for command in ["file.placeEmbedded", COMMAND, "layer.smartObjects.relinkToFile"] {
+        let mut app = app(vec![Some(Picked::Paths(vec![path.clone()]))], HistoricalXcfSampleOrder::BigEndian);
+        crate::open_prompt::arrive(
+            &mut app,
+            crate::open_prompt::Held {
+                doc: Document::new("Pending", Size::new(1, 1), ColorMode::Rgb, SampleType::U8),
+                read_only: false,
+                initial_view: None,
+                damage_pending: false,
+                name: "profile.psd".into(),
+                path: None,
+                warnings: vec![],
+                bytes: None,
+                slot: None,
+                order: None,
+                question: Some(json!({"missing":false,"working":"sRGB","embedded":"Adobe RGB"})),
+                policy_applied: false,
+                smart_object: false,
+            },
+        );
+        let prompt = profile_id(&app);
+        let before = app.session.active().unwrap().doc.clone();
+        crate::menus::invoke(&mut app, &egui::Context::default(), command, json!({})).unwrap();
+        app.poll_file_dialog();
+        app.poll_file_dialog();
+        assert!(Arc::ptr_eq(&before, &app.session.active().unwrap().doc), "{command}");
+        assert_eq!(app.historical_replacements.len(), 1, "{command}");
+        cancel(&mut app, prompt).unwrap();
+        assert!(app.prompt_order.is_empty(), "{command}");
+        assert!(app.historical_replacements.is_empty(), "{command}");
+        assert!(app.held_opens.is_empty(), "{command}");
+        assert_eq!(app.session.documents().len(), 1, "{command}");
+        let state = app.session.active().unwrap();
+        let LayerContent::Smart(smart) = &state.doc.layer(state.active_layer.unwrap()).unwrap().content else { panic!("smart object") };
+        match (command, &smart.source) {
+            ("layer.smartObjects.relinkToFile", SmartSource::Linked { path: linked }) => assert_eq!(std::path::Path::new(linked), path),
+            ("file.placeEmbedded" | COMMAND, SmartSource::Embedded { bytes, .. }) => assert_eq!(bytes.as_slice(), png),
+            (_, source) => panic!("unexpected source for {command}: {source:?}"),
+        }
+    }
 }
 
 #[test]

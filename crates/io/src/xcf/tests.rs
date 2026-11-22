@@ -642,6 +642,30 @@ fn masks_are_read_at_the_layer_offset_applied_or_not() {
 }
 
 #[test]
+fn active_and_non_active_xcf_mask_previews_disclose_the_display_difference() {
+    let mut image = TestImage::rgb8(1, 1);
+    image.version = 26;
+    for (name, selected, shown) in [("Other", false, true), ("Active", true, true), ("Quiet", false, false)] {
+        let mut layer = TestLayer::rgba(name, 1, 1, vec![51, 102, 153, 255]);
+        layer.mask = Some(vec![128]);
+        if selected {
+            layer.props.push((2, Vec::new()));
+        }
+        if shown {
+            layer.props.push((13, 1u32.to_be_bytes().to_vec()));
+        }
+        image.layers.push(layer);
+    }
+    let imported = open(&image.write()).unwrap();
+    let view = imported.initial_view.unwrap();
+    assert!(view.show_layer_mask);
+    assert_eq!(view.active_layer, Some(layer_at(&imported.document.layers, "Active").id));
+    assert_eq!(view.target, crate::initial_view::NativeImportTarget::Composite);
+    assert!(imported.warnings.iter().any(|warning| warning.contains("grayscale outside the original layer stack")));
+    assert!(imported.warnings.iter().any(|warning| warning.contains("non-active layer could not be restored")));
+}
+
+#[test]
 fn sixteen_bit_and_float_samples_are_big_endian() {
     // 16-bit gamma integer (250): one 2x1 gray+alpha layer.
     let mut img = TestImage::rgb8(2, 1);
@@ -1795,6 +1819,44 @@ fn distinguishes_perceptual_rgb_from_lab_for_both_compositing_space_signs() {
             report.entries.iter().any(|entry| entry.feature_code == "xcf.compositing_space" && entry.reason == ConversionReason::NativeLimitation),
             requested.unsigned_abs() == 3
         );
+    }
+}
+
+#[test]
+fn consecutive_link_properties_preserve_alignment_and_use_the_last_record() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    for height in [None, Some(0), Some(1), Some(2), Some(48)] {
+        for second_short in [false, true] {
+            let mut image = TestImage::rgb8(1, 1);
+            image.version = 26;
+            let mut layer = TestLayer::rgba("Linked", 1, 1, vec![51, 102, 153, 255]);
+            let mut headers = Vec::new();
+            for (name, width, height, short) in [("a", 13, height, true), ("b", 23, Some(29), second_short), ("c", 31, Some(37), true)] {
+                let mut payload = W { out: Vec::new(), wide: true };
+                payload.u32(0);
+                payload.string(name);
+                payload.u32(width);
+                if let Some(height) = height {
+                    payload.u32(height);
+                }
+                if short && height.is_some() {
+                    headers.push([48u32.to_be_bytes().as_slice(), &(payload.out.len() as u32).to_be_bytes(), &payload.out].concat());
+                }
+                layer.props.push((48, payload.out));
+            }
+            image.layers.push(layer);
+            let mut bytes = image.write();
+            for header in headers {
+                let at = bytes.windows(header.len()).position(|p| p == header).unwrap();
+                bytes[at + 4..at + 8].copy_from_slice(&((header.len() - 12) as u32).to_be_bytes());
+            }
+            let imported = open(&bytes).unwrap_or_else(|error| panic!("first height {height:?}, second short {second_short}: {error}"));
+            assert_eq!(pixel(&imported.document.layers[0], 0, 0), [0.2, 0.4, 0.6, 1.0]);
+            let Some(ImportConversion::Report(report)) = imported.document.metadata.import_conversion.as_deref() else { panic!("report") };
+            let link = report.entries.iter().find(|entry| entry.feature_code == "xcf.link_layer").unwrap();
+            assert!(link.source_description.contains("31x37"), "{}", link.source_description);
+            assert_eq!(link.reason, ConversionReason::NativePolicy);
+        }
     }
 }
 
