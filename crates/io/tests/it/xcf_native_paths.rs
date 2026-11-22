@@ -51,9 +51,9 @@ impl Wire {
     }
     /// Writes a portable source RGBA solid-paint record with explicit encoding and no external resource
     /// permission.
-    fn paint(&mut self, rgba: [u8; 4]) {
+    fn paint(&mut self, rgba: [u8; 4], antialiased: bool) {
         self.word(0); // Solid paint.
-        self.word(1); // Antialiased.
+        self.word(u32::from(antialiased));
         self.text("R'G'B'A u8");
         self.word(4);
         self.0.extend(rgba);
@@ -91,6 +91,10 @@ fn expected() -> ShapeLayer {
 /// Constructs a v26 vector-layer fixture with controlled modification flags, path reference and auxiliary
 /// axes.
 fn source(modified: bool, referenced_tattoo: u32, axes: u32) -> Vec<u8> {
+    source_with_appearance(modified, referenced_tattoo, axes, true, -2)
+}
+
+fn source_with_appearance(modified: bool, referenced_tattoo: u32, axes: u32, antialiased: bool, x: i32) -> Vec<u8> {
     let mut w = Wire(b"gimp xcf v026\0".to_vec());
     for value in [16, 12, 0, 150] {
         w.word(value);
@@ -107,13 +111,13 @@ fn source(modified: bool, referenced_tattoo: u32, axes: u32) -> Vec<u8> {
         w.word(value);
     }
     w.text("Native curve");
-    w.property(15, &[(-2i32).to_be_bytes(), 3i32.to_be_bytes()].concat());
+    w.property(15, &[x.to_be_bytes(), 3i32.to_be_bytes()].concat());
     let mut style = Wire(Vec::new());
     for value in [u32::from(modified), referenced_tattoo, 1, 1] {
         style.word(value);
     }
-    style.paint([255, 0, 0, 255]);
-    style.paint([0, 0, 0, 255]);
+    style.paint([255, 0, 0, 255], antialiased);
+    style.paint([0, 0, 0, 255], antialiased);
     style.float(2.5);
     for value in [1, 2] {
         style.word(value);
@@ -180,7 +184,9 @@ fn cubic_shape_fill_stroke_and_auxiliary_axes_use_native_geometry_and_rendering(
         let mut structural = shape.clone();
         structural.fill = expected.fill.clone();
         structural.cache = None;
+        structural.cache_preserves_appearance = false;
         assert_eq!(structural, expected);
+        assert!(shape.cache_preserves_appearance);
         assert_eq!(shape.cache.as_ref().unwrap().pixel(-2, 3), [17. / 255., 31. / 255., 57. / 255., 1.]);
         let composite = photocraft_compose::render(&doc, Rect::new(-2, 3, -1, 4));
         assert_eq!(composite.px[0], [17. / 255., 31. / 255., 57. / 255., 1.]);
@@ -197,6 +203,41 @@ fn cubic_shape_fill_stroke_and_auxiliary_axes_use_native_geometry_and_rendering(
         assert_eq!(reopened.paths, doc.paths);
         assert_eq!(reopened.layers[0].content, doc.layers[0].content);
         assert_eq!(reopened.metadata.import_conversion, doc.metadata.import_conversion);
+    }
+}
+
+#[test]
+fn clipping_and_layer_effects_use_saved_xcf_shape_coverage_after_native_reopen() {
+    use photocraft_doc::Layer;
+    use photocraft_doc::effects::{Effect, FxCommon, FxPaint, StrokeFx, StrokePosition};
+
+    let doc = photocraft_io::import("aliased.xcf", &source_with_appearance(false, 73, 2, false, 2)).unwrap().document;
+    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    for mut doc in [doc, photocraft_format::load_from_bytes(&bytes).unwrap()] {
+        let rect = doc.bounds();
+        let baseline = photocraft_compose::render(&doc, rect);
+        let native_shape = doc.layers[0].surface().unwrap().clone();
+        assert_eq!(native_shape.pixel(2, 3), [17. / 255., 31. / 255., 57. / 255., 1.]);
+        assert!(photocraft_vector::render_shape(&expected(), doc.pixel_format(), rect).tiles().next().is_some());
+        let mut clip = Layer::raster("Empty clipping layer", doc.pixel_format());
+        clip.clipped = true;
+        let base = doc.layers[0].id;
+        let clip_id = doc.insert_above(Some(base), clip);
+        assert_eq!(photocraft_compose::render(&doc, rect).px, baseline.px);
+        doc.remove(clip_id).unwrap();
+        doc.layers[0].effects.enabled = true;
+        doc.layers[0].effects.items.push(Effect::ColorOverlay { common: FxCommon::new(photocraft_color::BlendMode::Normal, 1.0), color: Color::WHITE });
+        doc.layers[0].effects.items.push(Effect::Stroke(StrokeFx {
+            common: FxCommon::new(photocraft_color::BlendMode::Normal, 0.65),
+            size: 2.0,
+            position: StrokePosition::Outside,
+            paint: FxPaint::Color(Color::BLACK),
+            overprint: false,
+        }));
+        let rendered = photocraft_compose::render(&doc, rect);
+        assert_ne!(rendered.px, baseline.px);
+        doc.layers[0].content = LayerContent::Raster(native_shape);
+        assert_eq!(rendered.px, photocraft_compose::render(&doc, rect).px);
     }
 }
 

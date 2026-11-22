@@ -1215,6 +1215,28 @@ fn moving_and_exporting_imported_shapes_keeps_their_rendering() {
 }
 
 #[test]
+fn editing_a_shape_replaces_its_authoritative_imported_cache() {
+    let mut s = session(40, 40, 8);
+    let id = add_imported_shape(&mut s, Rect::new(8, 8, 24, 24));
+    s.edit("retain source appearance", |doc, _| {
+        let LayerContent::Shape(shape) = &mut doc.layer_mut(id).unwrap().content else { panic!("shape") };
+        shape.stroke = Some(Default::default());
+        shape.cache_preserves_appearance = true;
+        Ok(())
+    })
+    .unwrap();
+    s.execute("layer.translate", json!({"layer":id.0,"dx":2,"dy":0})).unwrap();
+    let translated = shape_layer(doc(&s), id);
+    assert!(translated.cache_preserves_appearance);
+    assert!(orange_at(&translated, 16, 16));
+    s.execute("shape.edit", json!({"layer":id.0,"fill":"#ff0000"})).unwrap();
+    let edited = shape_layer(doc(&s), id);
+    assert!(!edited.cache_preserves_appearance);
+    assert_eq!(edited.cache.as_ref().unwrap().pixel(16, 16), [1., 0., 0., 1.]);
+    assert!(photocraft_compose::shape_split::split(&edited, doc(&s).bounds(), doc(&s).depth).is_some());
+}
+
+#[test]
 fn a_shape_reaching_past_the_canvas_renders_again_when_moved() {
     let mut s = session(100, 80, 8);
     // Cut at the canvas's right edge (100 px), so its pixels can't simply be shifted back in.

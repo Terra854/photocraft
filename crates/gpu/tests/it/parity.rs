@@ -2305,6 +2305,36 @@ fn stroke_effects_on_filled_and_stroked_shapes() {
     }
 }
 
+/// Cached imported strokes use their saved coverage through both GPU composition routes.
+#[test]
+fn historical_xcf_shape_saved_coverage_matches_cpu_for_clipping_and_effects() {
+    use photocraft_doc::vector::{Path, ShapeLayer, ShapeStroke, StrokeAlign, Subpath};
+    use photocraft_doc::{Effect, FxCommon, FxPaint, StrokePosition};
+
+    let Some(mut g) = gpu() else { return };
+    let mut doc = fx_doc(80, 60, SampleType::U8);
+    let mut cache = photocraft_raster::Surface::new(doc.pixel_format());
+    cache.fill_rect(Rect::new(18, 17, 28, 28), &[0.4, 0.3, 0.2, 1.0]);
+    let shape = ShapeLayer {
+        path: Path::new(vec![Subpath::polygon(&[(16.4, 13.8), (66.1, 18.3), (27.3, 48.9)])]),
+        fill: Some(Fill::Solid(Color::WHITE)),
+        stroke: Some(ShapeStroke { width: 2.0, align: StrokeAlign::Inside, ..Default::default() }),
+        cache: Some(cache),
+        cache_preserves_appearance: true,
+        ..Default::default()
+    };
+    doc.layers.push(Layer::new("saved shape", LayerContent::Shape(shape)));
+    let mut clip = Layer::raster("empty clip", doc.pixel_format());
+    clip.clipped = true;
+    doc.layers.push(clip);
+    check(&mut g, &doc, "saved shape with visible clipping layer");
+    doc.layers[1].effects.items = vec![
+        Effect::ColorOverlay { common: FxCommon::new(BlendMode::Normal, 1.0), color: Color::WHITE },
+        Effect::Stroke(stroke(2.5, StrokePosition::Outside, FxPaint::Color(Color::BLACK))),
+    ];
+    fx_check(&mut g, &doc, "saved shape with clipping and an outside stroke");
+}
+
 /// Whole-level gray rounds half down at Blend If cutoffs; fractional gray retains its precision.
 #[test]
 fn blend_if_gray_rounding_at_whole_levels() {

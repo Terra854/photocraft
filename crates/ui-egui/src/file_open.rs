@@ -22,7 +22,7 @@ pub(crate) fn apply_initial_path(app: &mut PhotocraftApp) {
     let selected = app.session.active_mut().and_then(|st| {
         let index = st.initial_path_selection.take()?;
         let path = st.doc.paths.get(index)?;
-        let reason = if matches!(path.name.as_str(), "work" | "layer") {
+        let reason = if photocraft_engine::vector_cmds::is_reserved_path_name(&path.name) {
             Some("the saved path name is reserved by the Paths UI")
         } else if st.doc.paths.iter().filter(|other| other.name == path.name).take(2).count() != 1 {
             Some("the saved path name is not unique")

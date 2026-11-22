@@ -1519,7 +1519,7 @@ fn queued_ordinary_import_without_hint_keeps_large_layer_tree_admissible() {
 
 #[test]
 fn unsupported_native_path_names_warn_once_without_selecting_or_renaming_paths() {
-    for kind in ["duplicate", "work", "layer"] {
+    for kind in ["duplicate", "", "work", "WORK", "wOrK", "Work Path", "layer"] {
         let (mut doc, view) = native_view_fixture();
         if kind == "duplicate" {
             doc.paths[1].name = "untrusted name".repeat(40_000);

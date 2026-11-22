@@ -502,6 +502,13 @@ impl PlaceInput {
         self.opts = options;
     }
 
+    /// Recheck a retained linked placement against the file before publishing it.
+    pub(crate) fn verify_historical_link(&mut self) {
+        if self.linked.is_some() {
+            self.params["verifyHistoricalXcfLink"] = json!(true);
+        }
+    }
+
     /// The job's name in the progress UI.
     pub(crate) fn job_label(&self) -> String {
         format!("Placing {}", file_name(&self.name))

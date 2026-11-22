@@ -128,8 +128,17 @@ impl ActionState {
     }
 }
 
-/// Visibility gestures name a layer for replay, since document-local ids change on another image.
+/// Turn live command parameters into parameters that can be replayed.
 pub(crate) fn recorded_params(s: &Session, id: &str, mut p: Value) -> Value {
+    if id == "layer.smartObjects.relinkToFile"
+        && p.get("historicalXcfSampleOrder").is_none_or(Value::is_null)
+        && let Some(object) = p.as_object_mut()
+    {
+        // The picker checks its snapshot before the live relink. Replay reads
+        // the asset at that path again, unless the user chose an order for its bytes.
+        object.remove("expectedSourceDigest");
+    }
+    // Visibility gestures name a layer because document-local IDs change on replay.
     if s.actions.recording.is_none() || id != "layer.setProps" || p.get("visible").is_none() {
         return p;
     }

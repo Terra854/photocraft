@@ -1866,6 +1866,7 @@ fn import_vectors(document: &mut Document, image: &mut Image<'_>, ctl: &Interrup
                 LayerContent::Text(text) => text.cache,
                 _ => None,
             };
+            shape.cache_preserves_appearance = shape.cache.is_some();
         }
         image.outcomes.notice(
             outcome,

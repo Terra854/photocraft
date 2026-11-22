@@ -102,7 +102,7 @@ fn prepare(path: String, bytes: Arc<Vec<u8>>, options: ImportOptions, confirm_da
 pub(crate) fn resume_smart_object(s: &mut Session, path: String, bytes: Arc<Vec<u8>>, options: ImportOptions, background: bool) -> Result<Started> {
     let name = file_name(&path);
     let params = json!({"path":path,"historicalXcfSampleOrder":options.historical_xcf_sample_order});
-    s.dispatch_retained_open(CMD, params, background, move |s| {
+    s.dispatch_retained_source(CMD, params, background, move |s| {
         crate::jobs::run(s, &format!("Opening {name}"), false, move |ctx| prepare(path, bytes, options, false, ctx), |s, ready| ready.apply(s))
     })
 }

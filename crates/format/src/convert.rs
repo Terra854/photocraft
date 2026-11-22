@@ -154,6 +154,7 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
         LayerContent::Shape(s) => ContentM::Shape {
             fill: s.fill.clone(),
             cache: s.cache.as_ref().map(|c| surface_m(c, sink)),
+            cache_preserves_appearance: s.cache_preserves_appearance,
             psd_raw: opt_blob(&s.psd_raw, sink),
             path: s.path.clone(),
             stroke: s.stroke.clone(),
@@ -525,21 +526,24 @@ impl Loader<'_> {
                 antialias: *antialias,
                 warp: warp.clone(),
             }),
-            ContentM::Shape { fill, cache, psd_raw, path, stroke, live, arrow_live, triangle_live, density, feather } => LayerContent::Shape(ShapeLayer {
-                path: path.clone(),
-                fill: fill.clone(),
-                stroke: stroke.clone(),
-                live: arrow_live
-                    .as_ref()
-                    .filter(|shape| matches!(shape, photocraft_doc::LiveShape::ArrowLine { .. }))
-                    .or_else(|| triangle_live.as_ref().filter(|shape| matches!(shape, photocraft_doc::LiveShape::Triangle { .. })))
-                    .cloned()
-                    .or_else(|| live.clone()),
-                cache: self.opt_surface(cache)?,
-                psd_raw: self.opt_blob(psd_raw)?,
-                density: *density,
-                feather: *feather,
-            }),
+            ContentM::Shape { fill, cache, cache_preserves_appearance, psd_raw, path, stroke, live, arrow_live, triangle_live, density, feather } => {
+                LayerContent::Shape(ShapeLayer {
+                    path: path.clone(),
+                    fill: fill.clone(),
+                    stroke: stroke.clone(),
+                    live: arrow_live
+                        .as_ref()
+                        .filter(|shape| matches!(shape, photocraft_doc::LiveShape::ArrowLine { .. }))
+                        .or_else(|| triangle_live.as_ref().filter(|shape| matches!(shape, photocraft_doc::LiveShape::Triangle { .. })))
+                        .cloned()
+                        .or_else(|| live.clone()),
+                    cache: self.opt_surface(cache)?,
+                    cache_preserves_appearance: *cache_preserves_appearance,
+                    psd_raw: self.opt_blob(psd_raw)?,
+                    density: *density,
+                    feather: *feather,
+                })
+            }
             ContentM::Smart {
                 contents_id,
                 source,

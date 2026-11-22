@@ -348,8 +348,11 @@ pub struct ShapeLayer {
     pub fill: Option<Fill>,
     pub stroke: Option<ShapeStroke>,
     pub live: Option<LiveShape>,
-    /// Rasterized appearance (from PSD or `photocraft-vector`).
+    /// Rasterized appearance from an import or from `photocraft-vector`.
     pub cache: Option<Surface>,
+    /// The saved pixels define the whole shape, including its stroke. Clipping and effects
+    /// use that appearance directly until a vector edit replaces the cache.
+    pub cache_preserves_appearance: bool,
     /// Data of the PSD vector mask block (`vsms`, else `vmsk`). On export it replaces that entry
     /// in [`crate::Layer::psd_blocks`] while it still decodes to `path`.
     pub psd_raw: Option<Arc<Vec<u8>>>,
@@ -362,7 +365,17 @@ pub struct ShapeLayer {
 
 impl Default for ShapeLayer {
     fn default() -> Self {
-        ShapeLayer { path: Path::default(), fill: None, stroke: None, live: None, cache: None, psd_raw: None, density: 1.0, feather: 0.0 }
+        ShapeLayer {
+            path: Path::default(),
+            fill: None,
+            stroke: None,
+            live: None,
+            cache: None,
+            cache_preserves_appearance: false,
+            psd_raw: None,
+            density: 1.0,
+            feather: 0.0,
+        }
     }
 }
 

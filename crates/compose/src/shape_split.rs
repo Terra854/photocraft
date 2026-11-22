@@ -83,13 +83,26 @@ pub fn purge_cache() -> usize {
     bytes
 }
 
+pub(crate) fn uses_saved_appearance(shape: &ShapeLayer) -> bool {
+    shape.cache_preserves_appearance && shape.cache.is_some()
+}
+
+/// Whether layer-effect coverage uses a native vector shape instead of saved pixels.
+pub fn uses_vector_effect_coverage(layer: &Layer) -> bool {
+    matches!(&layer.content, LayerContent::Shape(shape) if !uses_saved_appearance(shape))
+}
+
 /// (fill only, stroke only) of a stroked shape, rendered over `canvas` in RGBA at `depth`.
-/// `None` without a stroke. Where the shape's pixels
+/// `None` without a stroke or when the imported cache is the authoritative combined
+/// appearance. Where the shape's pixels
 /// (Photoshop's rendering, `sh.cache`) reach past our fill, the part the fill doesn't explain is
 /// stroke: the stroke follows Photoshop's coverage (psd-tools double-stroke-effects).
 pub fn split(sh: &ShapeLayer, canvas: Rect, depth: SampleType) -> Option<(Surface, Surface)> {
-    let generation = photocraft_raster::spill::read_error_generation();
     sh.stroke.as_ref()?;
+    if uses_saved_appearance(sh) {
+        return None;
+    }
+    let generation = photocraft_raster::spill::read_error_generation();
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (canvas.x0, canvas.y0, canvas.x1, canvas.y1).hash(&mut h);
     depth.hash(&mut h);

@@ -80,6 +80,25 @@ impl PlaceSteps {
         }
     }
 
+    /// Keep the original path parameter only for a placement that actually read it.
+    fn historical(&self, question: photocraft_io::HistoricalXcfSampleOrderRequest) -> PlaceOutcome {
+        let input = &self.input;
+        let mut params = input.params.clone();
+        if matches!(input.file, PlaceFile::Bytes(_))
+            && let Some(fields) = params.as_object_mut()
+        {
+            fields.remove("path");
+        }
+        PlaceOutcome::Historical {
+            name: input.name.clone(),
+            bytes: Arc::clone(&self.bytes),
+            question,
+            options: input.opts,
+            linked: input.linked.clone(),
+            params,
+        }
+    }
+
     /// One unit of work; `Some` when the place is prepared.
     fn advance(&mut self, ctx: &JobCtx, deadline: Instant) -> Result<Option<PlaceOutcome>> {
         match std::mem::replace(&mut self.stage, Stage::Spent) {
@@ -94,14 +113,7 @@ impl PlaceSteps {
                         .stage(0.0, 0.05, "Reading", |ctl| photocraft_io::historical_xcf_sample_order_request_with(&input.name, bytes, ctl))
                         .map_err(|error| self.io_error(error))?
                 {
-                    return Ok(Some(PlaceOutcome::Historical {
-                        name: input.name.clone(),
-                        bytes: Arc::clone(bytes),
-                        question,
-                        options: input.opts,
-                        linked: input.linked.clone(),
-                        params: input.params.clone(),
-                    }));
+                    return Ok(Some(self.historical(question)));
                 }
                 let png = if self.fine { PngImport::new(&input.name, bytes).map_err(|e| self.io_error(e))? } else { None };
                 match png {
@@ -113,14 +125,7 @@ impl PlaceSteps {
                             Err(photocraft_io::IoError::HistoricalXcfSampleOrderRequired(question))
                                 if input.params.get("askHistoricalXcfSampleOrder").and_then(Value::as_bool) == Some(true) =>
                             {
-                                return Ok(Some(PlaceOutcome::Historical {
-                                    name: input.name.clone(),
-                                    bytes: Arc::clone(bytes),
-                                    question,
-                                    options: input.opts,
-                                    linked: input.linked.clone(),
-                                    params: input.params.clone(),
-                                }));
+                                return Ok(Some(self.historical(question)));
                             }
                             result => result.map_err(|error| self.io_error(error))?,
                         };

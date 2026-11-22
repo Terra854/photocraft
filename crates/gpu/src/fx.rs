@@ -509,6 +509,7 @@ pub(crate) fn shape_key(layer: &Layer, canvas: Rect) -> u64 {
         // A filled shape's effect shape follows its outline too.
         LayerContent::Shape(sh) => {
             std::mem::discriminant(&layer.content).hash(&mut h);
+            photocraft_compose::shape_split::uses_vector_effect_coverage(layer).hash(&mut h);
             if photocraft_compose::effect_outline(layer).is_some() {
                 // The cached maps live in region-local coordinates. Preserve their identity
                 // under translation so sync_fx can verify coverage and reuse them after a move.
@@ -555,6 +556,9 @@ pub(crate) fn group_key(layer: &Layer, light: &GlobalLight, pin: &mut dyn FnMut(
     fn walk(l: &Layer, h: &mut std::collections::hash_map::DefaultHasher, pin: Pin) {
         l.id.0.hash(h);
         (l.visible, l.clipped, l.opacity.to_bits(), l.fill_opacity.to_bits(), format!("{:?}", l.blend)).hash(h);
+        if matches!(l.content, LayerContent::Shape(_)) {
+            photocraft_compose::shape_split::uses_vector_effect_coverage(l).hash(h);
+        }
         match &l.content {
             LayerContent::Group(g) => {
                 for c in &g.children {

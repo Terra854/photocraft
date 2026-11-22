@@ -110,7 +110,7 @@ fn paint(c: &mut Cursor<'_>, enabled: bool, notes: &mut Vec<String>) -> Result<O
         _ => return Err(invalid("unsupported vector paint style")),
     }
     if !aa {
-        notes.push("Source paint antialiasing is disabled; native shape rasterization applies".into());
+        notes.push("Source paint antialiasing is disabled; subsequent vector edits use native shape antialiasing".into());
     }
     let literal = literal.ok_or_else(|| crate::IoError::Unsupported("enabled vector paint has no stored color".into()))?;
     let color = if let ("R'G'B'A u8", [r, g, b, a], []) = (literal.encoding, literal.pixels, literal.profile) {

@@ -35,6 +35,9 @@ pub(crate) fn layer_identity(layer: &Layer, h: &mut std::collections::hash_map::
     // the key (an opacity drag must not rebuild shadows over the whole layer; the GPU's
     // `fx::shape_key` keeps them out for the same reason).
     layer.fill_opacity.to_bits().hash(h);
+    if let LayerContent::Shape(sh) = &layer.content {
+        super::shape_split::uses_saved_appearance(sh).hash(h);
+    }
     match &layer.content {
         LayerContent::Group(g) => {
             for c in &g.children {

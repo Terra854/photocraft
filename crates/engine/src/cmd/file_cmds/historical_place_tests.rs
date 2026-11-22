@@ -137,6 +137,63 @@ fn scripted_place_open_and_relink_ignore_unused_sample_order_for_modern_xcf() {
 }
 
 #[test]
+fn confirmed_disk_placement_records_one_replayable_action_step() {
+    use crate::actions_cmds::Action;
+    use crate::jobs::Started;
+    use photocraft_io::HistoricalXcfSampleOrder::LittleEndian;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recorded.xcf");
+    std::fs::write(&path, fixture::historical_pixel(true)).unwrap();
+    for (command, background) in [("file.placeEmbedded", false), ("file.placeLinked", true)] {
+        let mut s = session();
+        s.actions.list.push(Action::new("Place source", vec![])).unwrap();
+        s.execute("actions.record", json!({"action":"Place source"})).unwrap();
+        let params = json!({"path":path,"askHistoricalXcfSampleOrder":true,"frame":false});
+        let pending = match s.dispatch(command, params, background).unwrap() {
+            Started::Done(value) => value,
+            Started::Job(job) => s.wait_job(job).unwrap(),
+        };
+        let held = pending["heldHistoricalXcfPlace"].as_u64().unwrap();
+        assert!(!s.journal.iter().any(|(id, _)| id == command));
+        if let Started::Job(job) = s.resume_historical_xcf_open(held, LittleEndian, background).unwrap() {
+            s.wait_job(job).unwrap();
+        }
+        s.execute("actions.stop", json!({})).unwrap();
+        let steps = &s.actions.list.actions()[0].steps;
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].command, command);
+        assert_eq!(steps[0].params["path"], json!(path));
+        assert_eq!(steps[0].params["historicalXcfSampleOrder"], "little-endian");
+        assert_eq!(steps[0].params["frame"], false);
+        assert!(steps[0].params.get("askHistoricalXcfSampleOrder").is_none());
+        assert!(steps[0].params.get("verifyHistoricalXcfLink").is_none());
+        let mut replay = session();
+        replay.actions.list = s.actions.list.clone();
+        replay.execute("actions.play", json!({"action":"Place source"})).unwrap();
+        assert_eq!(active_smart(&replay).unwrap().historical_xcf_sample_order, Some(LittleEndian));
+    }
+}
+
+#[test]
+fn byte_only_historical_place_is_not_recorded_as_a_path_command() {
+    use crate::jobs::Started;
+    use photocraft_io::HistoricalXcfSampleOrder::LittleEndian;
+
+    let mut s = session();
+    let request =
+        s.start_place_bytes("drop.xcf", fixture::historical_pixel(true), None, json!({"askHistoricalXcfSampleOrder":true,"path":"unread.xcf"})).unwrap();
+    let question = match request {
+        Started::Done(value) => value,
+        Started::Job(job) => s.wait_job(job).unwrap(),
+    };
+    let held = question["heldHistoricalXcfPlace"].as_u64().unwrap();
+    assert!(matches!(s.resume_historical_xcf_open(held, LittleEndian, false).unwrap(), Started::Done(_)));
+    assert!(active_smart(&s).is_some());
+    assert!(!s.journal.iter().any(|(id, _)| id == "file.placeEmbedded"));
+}
+
+#[test]
 fn historical_place_resume_keeps_the_frame_and_original_file_bytes() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("frame.xcf");

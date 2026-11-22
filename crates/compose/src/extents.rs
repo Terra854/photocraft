@@ -37,7 +37,7 @@ pub fn layer_bounds(layer: &Layer, canvas: Rect) -> Rect {
         _ => {
             let b = layer.surface().map_or(Rect::EMPTY, bounds::content_bounds);
             let b = match &layer.content {
-                LayerContent::Shape(sh) => {
+                LayerContent::Shape(sh) if !shape_split::uses_saved_appearance(sh) => {
                     let p = shape_bounds(sh).map(|r| r.intersect(&canvas)).unwrap_or(Rect::EMPTY);
                     if !b.is_empty() && !p.is_empty() {
                         b.union(&p)
@@ -101,9 +101,12 @@ pub fn effect_source_bounds(layer: &Layer, canvas: Rect) -> Rect {
 /// whole path even where a gradient fill fades out (psd-tools stroke-effects). `None` for other
 /// layers, shapes without fill, empty and inverted paths, and shapes whose vector stroke reaches
 /// past the path (their pixels give the outline: psd-tools double-stroke-effects), and shapes
-/// with a density or feather.
+/// with a density, feather or authoritative imported pixels.
 pub fn effect_outline(layer: &Layer) -> Option<&photocraft_doc::vector::Path> {
     let LayerContent::Shape(sh) = &layer.content else { return None };
+    if shape_split::uses_saved_appearance(sh) {
+        return None;
+    }
     let stroke_inside = sh.stroke.as_ref().is_none_or(|s| s.width <= 0.0 || s.align == photocraft_doc::vector::StrokeAlign::Inside);
     // A soft (feathered or less dense) fill's own alpha is its outline.
     (sh.fill.is_some() && stroke_inside && !sh.path.is_empty() && !sh.path.inverted && !sh.has_soft_mask()).then_some(&sh.path)
@@ -170,6 +173,9 @@ pub(crate) fn effect_shape_with<A: BufferAlloc>(layer: &Layer, rect: Rect, cx: &
 /// not the 32 px of pixels.
 pub fn paint_bounds(layer: &Layer) -> Option<Rect> {
     let LayerContent::Shape(sh) = &layer.content else { return None };
+    if shape_split::uses_saved_appearance(sh) {
+        return None;
+    }
     let (x0, y0, x1, y1) = sh.path.control_bounds()?;
     let r = Rect::new(x0.floor() as i32, y0.floor() as i32, x1.floor() as i32, y1.floor() as i32);
     (!r.is_empty()).then_some(r)

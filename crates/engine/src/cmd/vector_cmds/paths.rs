@@ -9,6 +9,13 @@ use super::{
 // Document paths
 // ---------------------------------------------------------------------------
 
+const LAYER_PATH: &str = "layer";
+
+/// Whether a path command would interpret this saved path name as a special target.
+pub fn is_reserved_path_name(name: &str) -> bool {
+    is_work(Some(name)) || name == LAYER_PATH
+}
+
 pub(crate) fn is_work(name: Option<&str>) -> bool {
     name.is_none_or(|n| n.is_empty() || n.eq_ignore_ascii_case("work") || n == "Work Path")
 }
@@ -25,7 +32,7 @@ pub(super) fn resolve_path(s: &Session, name: Option<&str>) -> Result<Path> {
             _ => l.vector_mask.as_ref().map(|v| v.path.clone()),
         }
     };
-    if name == Some("layer") {
+    if name == Some(LAYER_PATH) {
         return layer_path().ok_or_else(|| EngineError::Other("active layer has no shape path or vector mask".into()));
     }
     if is_work(name) {

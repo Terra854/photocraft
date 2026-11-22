@@ -292,6 +292,8 @@ pub enum ContentM {
     Shape {
         fill: Option<Fill>,
         cache: Option<SurfaceM>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cache_preserves_appearance: bool,
         psd_raw: Option<Hash>,
         #[serde(default)]
         path: Path,
@@ -440,7 +442,8 @@ mod shape_tests {
     #[test]
     fn older_shapes_load_at_full_density_without_feather() {
         let old = serde_json::json!({ "kind": "shape", "fill": null, "cache": null, "psd_raw": null });
-        let ContentM::Shape { density, feather, .. } = serde_json::from_value(old).unwrap() else { panic!("a shape") };
+        let ContentM::Shape { density, feather, cache_preserves_appearance, .. } = serde_json::from_value(old).unwrap() else { panic!("a shape") };
         assert_eq!((density, feather), (1.0, 0.0));
+        assert!(!cache_preserves_appearance);
     }
 }

@@ -33,6 +33,42 @@ fn assert_child_pixels(s: &Session) {
 }
 
 #[test]
+fn recorded_relink_reopens_the_current_png_at_the_recorded_path() {
+    use crate::actions_cmds::Action;
+    use photocraft_codecs::{ChannelLayout, Format, Image, encode};
+
+    let png = |pixel: [u8; 3]| {
+        let image = Image::from_u8(1, 1, ChannelLayout::Rgb, pixel.to_vec()).unwrap();
+        encode(&image, Format::Png, &Default::default()).unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("picked.png");
+    let initial = png([255, 0, 0]);
+    std::fs::write(&path, &initial).unwrap();
+    let mut s = session();
+    let place = s.execute("file.placeEmbedded", json!({"path":path})).unwrap();
+    let id = LayerId(place["layer"].as_u64().unwrap());
+    s.actions.list.push(Action::new("Relink asset", vec![])).unwrap();
+    s.execute("actions.record", json!({"action":"Relink asset"})).unwrap();
+    let params = json!({
+        "layer": id.0, "path": path, "historicalXcfSampleOrder": null,
+        "expectedSourceDigest": photocraft_io::linked::historical_xcf_digest(&initial),
+    });
+    let Started::Job(job) = s.start(RELINK, params.clone()).unwrap() else { panic!("relink runs in the background") };
+    s.wait_job(job).unwrap();
+    s.execute("actions.stop", json!({})).unwrap();
+    let steps = &s.actions.list.actions()[0].steps;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].command, RELINK);
+    assert!(steps[0].params.get("expectedSourceDigest").is_none());
+    assert_eq!(steps[0].params["historicalXcfSampleOrder"], Value::Null);
+    std::fs::write(&path, png([0, 255, 0])).unwrap();
+    assert!(s.execute(RELINK, params).unwrap_err().to_string().contains("changed after it was picked"));
+    s.execute("actions.play", json!({"action":"Relink asset"})).unwrap();
+    assert_eq!(object(&s, id).cache.as_ref().unwrap().pixel(0, 0), [0., 1., 0., 1.]);
+}
+
+#[test]
 fn historical_smart_placements_native_reopen_edit_and_save_contents_keep_source_identity() {
     let dir = tempfile::tempdir().unwrap();
     for (little, order, interpretation) in
@@ -471,6 +507,13 @@ fn historical_relink_confirmation_authenticates_the_picked_bytes() {
     let expected = photocraft_io::linked::historical_xcf_digest(&big);
     s.execute(RELINK, json!({"layer":id.0,"path":picked,"historicalXcfSampleOrder":"big-endian","expectedSourceDigest":expected})).unwrap();
     assert_eq!(object(&s, id).historical_xcf_link_digest, Some(expected));
+    let (command, recorded) = s.journal.last().unwrap();
+    assert_eq!(command, RELINK);
+    assert_eq!(recorded["historicalXcfSampleOrder"], "big-endian");
+    assert_eq!(recorded["expectedSourceDigest"], json!(expected));
+    std::fs::write(&picked, &little).unwrap();
+    let recorded = recorded.clone();
+    assert!(s.execute(RELINK, recorded).unwrap_err().to_string().contains("changed after it was picked"));
 }
 
 #[test]

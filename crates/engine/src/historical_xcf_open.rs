@@ -127,16 +127,24 @@ impl Session {
                 }
                 let mut params = params.clone();
                 params["historicalXcfSampleOrder"] = json!(order);
-                if linked.is_some() {
-                    params["verifyHistoricalXcfLink"] = json!(true);
-                }
                 let mut input = crate::file_cmds::PlaceInput::from_shared_bytes(self, &name, bytes, linked.clone(), &params)?;
                 input.set_import_options(options);
+                input.verify_historical_link();
                 let command = input.command();
-                if let Some(conflict) = self.job_conflict(command, true) {
-                    return Err(EngineError::Other(conflict));
+                let spawn = background || self.cooperative_jobs();
+                let place = move |s: &mut Session| crate::file_cmds::place_input(s, input);
+                if params.get("path").and_then(Value::as_str).is_some() {
+                    if let Some(fields) = params.as_object_mut() {
+                        fields.remove("askHistoricalXcfSampleOrder");
+                        fields.remove("verifyHistoricalXcfLink");
+                    }
+                    self.dispatch_retained_source(command, params, spawn, place)?
+                } else {
+                    if let Some(conflict) = self.job_conflict(command, true) {
+                        return Err(EngineError::Other(conflict));
+                    }
+                    self.start_registered(command, params, spawn, place)?
                 }
-                self.start_registered(command, params, background || self.cooperative_jobs(), |s| crate::file_cmds::place_input(s, input))?
             }
         };
         self.jobs.historical_xcf.retain(|held| held.id != id);

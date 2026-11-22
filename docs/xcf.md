@@ -47,7 +47,7 @@ XCF import.
 | Colour profile (`icc-profile` parasite), resolution, guides, comment | usable profiles and the other fields are retained. Unusable profile assignments fall back with an import diagnostic |
 | Grayscale, RGB | as such; indexed images open as RGB |
 | Extra channels, the saved selection | yes (alpha channels, the selection) |
-| Text and vector layers | supported records become editable native content; other records keep usable saved pixels and a conversion report |
+| Text and vector layers | supported records become editable native content. Editable shapes keep their saved pixels under clipping and layer effects until a shape edit. Other records keep usable saved pixels and a conversion report |
 | Linked content | inert references and saved pixels; external resources are not fetched |
 | Compression | none, RLE, zlib; gzip, bzip2 and XZ transport wrappers |
 | XCF versions | 0 to 26 (GIMP 1.x to 3.2); newer files open with a note, unknown parts skipped |
