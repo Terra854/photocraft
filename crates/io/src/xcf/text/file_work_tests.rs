@@ -145,7 +145,7 @@ fn exact_file_work_boundary_keeps_multiple_native_owners() {
     let mut layout = POINT_LAYOUT_WORK_UNITS;
     reset();
     for _ in 0..2 {
-        let decoded = decode_with_work(&config, 72., (0, 0), &Interrupt::NONE, &mut layout, &mut work).unwrap().unwrap();
+        let decoded = decode_with_work(&config, (72., 72.), (0, 0), &Interrupt::NONE, &mut layout, &mut work).unwrap().unwrap();
         assert_eq!(decoded.layer.text, "éé");
         assert!(decoded.layer.runs.iter().all(|run| run.style.weight == 700));
     }
@@ -170,7 +170,7 @@ fn failed_markup_does_not_refund_file_attribute_work() {
         // Each of the first two attempts fails its local cap after two visits.
         // Failure must not restore those visits for the next owner.
         MARKUP_ATTRIBUTE_VISIT_LIMIT.with(|slot| slot.set(Some(2)));
-        let error = decode_with_work(&config, 72., (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap();
+        let error = decode_with_work(&config, (72., 72.), (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap();
         let expected = if owner < 2 { "bounded attribute-visit" } else { "document text attribute-visit" };
         assert!(matches!(error, crate::IoError::Unsupported(message) if message.contains(expected)));
         assert_eq!(counts(), (owner + 1, (owner + 1).min(2) * 2, (owner + 1).min(2) * 20));
@@ -219,9 +219,9 @@ fn invalid_modern_and_legacy_configs_spend_shared_source_work_before_parse() {
         reset();
         for owner in 0..3 {
             let error = if !repeat && owner == 1 {
-                decode_gdyntext_with_work(&[255], 72., (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap()
+                decode_gdyntext_with_work(&[255], (72., 72.), (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap()
             } else {
-                decode_with_work(b"(", 72., (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap()
+                decode_with_work(b"(", (72., 72.), (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap()
             };
             if owner == 2 {
                 assert!(matches!(error, crate::IoError::Unsupported(message) if message.contains("configuration source-work")));
@@ -242,8 +242,8 @@ fn cancellation_precedes_file_work_debits_for_modern_and_legacy() {
     let mut work = quota(0, 0, 0);
     let mut layout = POINT_LAYOUT_WORK_UNITS;
     reset();
-    assert!(matches!(decode_with_work(b"(", 72., (0, 0), &ctl, &mut layout, &mut work), Err(crate::IoError::Cancelled)));
-    assert!(matches!(decode_gdyntext_with_work(&[255], 72., (0, 0), &ctl, &mut layout, &mut work), Err(crate::IoError::Cancelled)));
+    assert!(matches!(decode_with_work(b"(", (72., 72.), (0, 0), &ctl, &mut layout, &mut work), Err(crate::IoError::Cancelled)));
+    assert!(matches!(decode_gdyntext_with_work(&[255], (72., 72.), (0, 0), &ctl, &mut layout, &mut work), Err(crate::IoError::Cancelled)));
     assert_eq!(counts(), (0, 0, 0));
     assert_eq!((work.config_bytes_left, work.attributes.visits_left, work.attributes.bytes_left), (0, 0, 0));
     assert_eq!(layout, POINT_LAYOUT_WORK_UNITS);

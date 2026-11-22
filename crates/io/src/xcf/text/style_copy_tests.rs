@@ -91,7 +91,7 @@ fn resource_construction_cannot_discard_an_uncharged_base_style() {
     let _limits = limits(None, Some(1));
     let mut work = DecodeWork::default();
     let mut layout = POINT_LAYOUT_WORK_UNITS;
-    let error = decode_with_work(config.as_bytes(), 72., (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap();
+    let error = decode_with_work(config.as_bytes(), (72., 72.), (0, 0), &Interrupt::NONE, &mut layout, &mut work).err().unwrap();
     assert!(matches!(error, crate::IoError::Unsupported(message) if message.contains("document text style-copy")));
     assert_eq!(copied(), 0);
     assert_eq!(work.attributes.copies_left, 0, "a refused shared charge saturates and is never refunded");
@@ -184,7 +184,7 @@ fn cancellation_precedes_style_copy_work_with_exhausted_allowances() {
     let mut work = DecodeWork::default();
     let mut layout = POINT_LAYOUT_WORK_UNITS;
     let cancel = || true;
-    let result = decode_with_work(&config(true), 72., (0, 0), &Interrupt::cancel_only(&cancel), &mut layout, &mut work);
+    let result = decode_with_work(&config(true), (72., 72.), (0, 0), &Interrupt::cancel_only(&cancel), &mut layout, &mut work);
     assert!(matches!(result, Err(crate::IoError::Cancelled)));
     assert_eq!(copied(), 0);
     assert_eq!(work.attributes.copies_left, 0);

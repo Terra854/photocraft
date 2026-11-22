@@ -405,6 +405,63 @@ fn unit_scale(unit: &str, dpi: f64) -> Result<f64> {
     }
 }
 
+fn valid_resolution((x, y): (f32, f32)) -> bool {
+    [x, y].into_iter().all(|axis| axis.is_finite() && axis > 0.0)
+}
+
+/// Map source point sizes into the document's scalar DPI and carry the
+/// horizontal stretch in the normal editable text transform.
+fn apply_native_resolution(layer: &mut TextLayer, (x, y): (f32, f32), native_policy: &mut Vec<String>, ctl: &photocraft_raster::Interrupt<'_>) -> Result<()> {
+    if x == y {
+        return Ok(());
+    }
+    let width_scale = f64::from(x) / f64::from(y);
+    let transform = layer.transform.mul(&Affine { m: [width_scale, 0., 0., 1., 0., 0.] });
+    if transform.inverse().is_none() || transform.m.iter().take(4).any(|value| value.abs() > 10_000.) {
+        return Err(crate::IoError::Unsupported("unequal source DPI exceeds the editable text transform bounds".into()));
+    }
+    if let TextShape::Box { width, height, .. } = &mut layer.shape {
+        // The native box wraps and handles overflow in text space. Undo the
+        // horizontal stretch in its width to keep the specified canvas extent.
+        let local_width = f64::from(*width) / width_scale;
+        let limit = f64::from(super::MAX_SIDE);
+        if ![f64::from(*width), f64::from(*height), local_width].into_iter().all(|axis| (0.0..=limit).contains(&axis)) {
+            return Err(crate::IoError::Unsupported("unequal source DPI exceeds the editable text box bounds".into()));
+        }
+        *width = local_width as f32;
+    }
+    let native_dpi = f64::from(x);
+    let destination_points = |points: f32| {
+        let value = f64::from(points) / width_scale;
+        let pixels = value.abs() * native_dpi / 72.0;
+        if value.abs() <= 1_000_000. && pixels <= f64::from(super::MAX_SIDE) {
+            Ok(value as f32)
+        } else {
+            Err(crate::IoError::Unsupported("unequal source DPI exceeds the editable text metric bounds".into()))
+        }
+    };
+    for (index, run) in layer.runs.iter_mut().enumerate() {
+        if index.is_multiple_of(128) {
+            ctl.check().map_err(|_| crate::IoError::Cancelled)?;
+        }
+        let style = &mut run.style;
+        style.size_pt = destination_points(style.size_pt)?;
+        if style.size_pt <= 0. {
+            return Err(crate::IoError::Unsupported("unequal source DPI produces a nonpositive native font size".into()));
+        }
+        style.baseline_shift_pt = destination_points(style.baseline_shift_pt)?;
+        style.leading_pt = style.leading_pt.map(destination_points).transpose()?;
+    }
+    for paragraph in &mut layer.paragraphs {
+        paragraph.style.first_line_indent_pt = destination_points(paragraph.style.first_line_indent_pt)?;
+    }
+    layer.transform = transform;
+    native_policy.push(format!(
+        "Source text uses {x} × {y} DPI. Source scaling and box dimensions are stored in editable form; PhotoCraft wrapping and overflow rules apply on edit"
+    ));
+    Ok(())
+}
+
 pub(super) struct DecodedText {
     pub layer: TextLayer,
     pub source_only: Vec<String>,
@@ -539,19 +596,19 @@ pub(super) fn decode_with_interrupt(
     ctl: &photocraft_raster::Interrupt<'_>,
     work_left: &mut usize,
 ) -> Result<Option<DecodedText>> {
-    decode_with_work(data, dpi, offset, ctl, work_left, &mut DecodeWork::default())
+    decode_with_work(data, (dpi, dpi), offset, ctl, work_left, &mut DecodeWork::default())
 }
 
 pub(super) fn decode_with_work(
     data: &[u8],
-    dpi: f32,
+    resolution: (f32, f32),
     offset: (i32, i32),
     ctl: &photocraft_raster::Interrupt<'_>,
     work_left: &mut usize,
     decode_work: &mut DecodeWork,
 ) -> Result<Option<DecodedText>> {
     ctl.check().map_err(|_| crate::IoError::Cancelled)?;
-    if data.len() > super::MAX_STRING || !dpi.is_finite() || dpi <= 0.0 {
+    if data.len() > super::MAX_STRING || !valid_resolution(resolution) {
         return Err(invalid("text configuration size or DPI is invalid"));
     }
     decode_work.charge_config(data.len())?;
@@ -565,7 +622,7 @@ pub(super) fn decode_with_work(
         }
         fields.push(parser.value(0)?);
     }
-    let dpi = f64::from(dpi);
+    let dpi = f64::from(resolution.1);
     let scale = unit_scale(scalar(&fields, "font-size-unit")?.unwrap_or("pixels"), dpi)?;
     let size_pt = (number(&fields, "font-size", 24.0, 0.001, 8192.0)? * scale) as f32;
     if !size_pt.is_finite() || size_pt > 1_000_000.0 {
@@ -693,12 +750,15 @@ pub(super) fn decode_with_work(
         note(&mut notes, "Vertical source typography uses native vertical text layout".into());
     }
     if scalar(&fields, "box-mode")?.unwrap_or("dynamic") == "fixed" {
-        let px = unit_scale(scalar(&fields, "box-unit")?.unwrap_or("pixels"), dpi)? * dpi / 72.0;
+        let unit = scalar(&fields, "box-unit")?.unwrap_or("pixels");
+        let horizontal_dpi = f64::from(resolution.0);
+        let px_x = unit_scale(unit, horizontal_dpi)? * horizontal_dpi / 72.0;
+        let px_y = unit_scale(unit, dpi)? * dpi / 72.0;
         layer.shape = TextShape::Box {
             x: 0.0,
             y: 0.0,
-            width: (number(&fields, "box-width", 0.0, 0.0, 300_000.0)? * px) as f32,
-            height: (number(&fields, "box-height", 0.0, 0.0, 300_000.0)? * px) as f32,
+            width: (number(&fields, "box-width", 0.0, 0.0, 300_000.0)? * px_x) as f32,
+            height: (number(&fields, "box-height", 0.0, 0.0, 300_000.0)? * px_y) as f32,
         };
     }
     if let Some(matrix) = field(&fields, "transformation")? {
@@ -787,8 +847,9 @@ pub(super) fn decode_with_work(
         }
     }
     layer.paragraphs.push(ParagraphRun { len: layer.text.len(), style: para });
+    apply_native_resolution(&mut layer, resolution, &mut native_policy, ctl)?;
     layer.sync_summary();
-    if !anchor_point_origin(&mut layer, dpi as f32, ctl, work_left)? {
+    if !anchor_point_origin(&mut layer, resolution.0, ctl, work_left)? {
         return Ok(None);
     }
     // These GIMP-specific fields cannot silently control native layout.
@@ -843,21 +904,22 @@ pub(super) fn decode_gdyntext_with_interrupt(
     ctl: &photocraft_raster::Interrupt<'_>,
     work_left: &mut usize,
 ) -> Result<Option<DecodedText>> {
-    decode_gdyntext_with_work(data, dpi, offset, ctl, work_left, &mut DecodeWork::default())
+    decode_gdyntext_with_work(data, (dpi, dpi), offset, ctl, work_left, &mut DecodeWork::default())
 }
 
 pub(super) fn decode_gdyntext_with_work(
     data: &[u8],
-    dpi: f32,
+    resolution: (f32, f32),
     offset: (i32, i32),
     ctl: &photocraft_raster::Interrupt<'_>,
     work_left: &mut usize,
     decode_work: &mut DecodeWork,
 ) -> Result<Option<DecodedText>> {
     ctl.check().map_err(|_| crate::IoError::Cancelled)?;
-    if data.len() > super::MAX_STRING || !dpi.is_finite() || dpi <= 0. {
+    if data.len() > super::MAX_STRING || !valid_resolution(resolution) {
         return Err(invalid("invalid legacy text size or DPI"));
     }
+    let dpi = resolution.1;
     decode_work.charge_config(data.len())?;
     let source = std::str::from_utf8(data.strip_suffix(&[0]).unwrap_or(data)).map_err(|_| invalid("legacy text configuration is not UTF-8 escaped data"))?;
     let source = source.strip_prefix("GDT10{").and_then(|source| source.strip_suffix('}')).ok_or_else(|| invalid("legacy text magic/framing is invalid"))?;
@@ -946,8 +1008,9 @@ pub(super) fn decode_gdyntext_with_work(
     let mut layer = TextLayer { text, transform: Affine::translate(f64::from(offset.0), f64::from(offset.1)), antialias, ..Default::default() };
     layer.runs.push(TextRun { len: layer.text.len(), style });
     layer.paragraphs.push(ParagraphRun { len: layer.text.len(), style: ParagraphStyle { align, direction: TextDirection::Ltr, ..Default::default() } });
+    apply_native_resolution(&mut layer, resolution, &mut native_policy, ctl)?;
     layer.sync_summary();
-    if !anchor_point_origin(&mut layer, dpi, ctl, work_left)? {
+    if !anchor_point_origin(&mut layer, resolution.0, ctl, work_left)? {
         return Ok(None);
     }
     ctl.check().map_err(|_| crate::IoError::Cancelled)?;

@@ -55,7 +55,10 @@ XCF import.
 | Compression | none, RLE, zlib; gzip, bzip2 and XZ transport wrappers |
 | XCF versions | 0 to 26 (GIMP 1.x to 3.2); newer files open with a note, unknown parts skipped |
 
-Text layers in documents with unequal horizontal and vertical DPI keep their saved pixels.
+Text layers with unequal horizontal and vertical DPI keep their saved pixels on open and stay
+editable when their geometry fits native limits. The importer uses a standard text transform
+for the source scaling and converts physical box dimensions on each axis. Subsequent edits use
+PhotoCraft's paragraph wrapping and overflow rules, so line breaks can change.
 Vector layers with an enabled pattern also keep their saved pixels, with the source path
 available separately for editing. Active paint that cannot be decoded, including writer-endian
 float colours without byte-order evidence, also preserves the saved appearance. Canvas Size
