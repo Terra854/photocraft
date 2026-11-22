@@ -54,7 +54,14 @@ fn consumed_indexed_palettes_remain_strict_and_valid_palette_alpha_is_preserved(
     for payload in [vec![], vec![0, 0, 1, 1], vec![0, 0, 0, 1, 10, 20], u32::MAX.to_be_bytes().to_vec()] {
         assert!(crate::import("indexed-palette.xcf", &source(2, payload)).is_err());
     }
-    let imported = crate::import("indexed-palette.xcf", &source(2, vec![0, 0, 0, 1, 17, 31, 57])).unwrap();
+    let canonical = source(2, vec![0, 0, 0, 1, 17, 31, 57]);
+    let imported = crate::import("indexed-palette.xcf", &canonical).unwrap();
+    for (declared, accepted) in [(5u32, true), (7, true), (8, false)] {
+        let mut bytes = canonical.clone();
+        // After the header, compression property, and colormap type.
+        bytes[43..47].copy_from_slice(&declared.to_be_bytes());
+        assert_eq!(crate::import("indexed-palette.xcf", &bytes).is_ok(), accepted);
+    }
     assert_eq!(imported.document.layers[0].surface().unwrap().pixel(0, 0), vec![17. / 255., 31. / 255., 57. / 255., 128. / 255.]);
 }
 

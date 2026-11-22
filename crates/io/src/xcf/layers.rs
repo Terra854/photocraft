@@ -118,7 +118,7 @@ impl<'a> Image<'a> {
                     ptr,
                     &name,
                     &[],
-                    cprops.iter().find(|p| p.kind == 20).and_then(|p| be_u32(p.data)),
+                    cprops.iter().rfind(|p| p.kind == 20).and_then(|p| be_u32(p.data)),
                 ),
                 targets: vec![NativeTargetRef {
                     channel_index: if native_selection { None } else { Some(channels.len() as u32) },
@@ -360,52 +360,35 @@ impl<'a> Image<'a> {
         Ok(())
     }
 
+    fn note_malformed_text_parasites(&mut self, outcome: usize, malformed_parasites: bool) -> Result<()> {
+        if malformed_parasites {
+            self.outcomes.notice(
+                outcome,
+                "xcf.parasite_framing",
+                ConversionReason::InvalidOptionalData,
+                (
+                    "Malformed optional layer parasite record".into(),
+                    "Valid preceding text configuration remains usable; original source retained inert within report limits".into(),
+                ),
+                Some("has malformed optional layer metadata; valid preceding records were preserved"),
+                &mut self.warnings,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Translate unmodified stored text into editable native text, retaining saved pixels on optional-data failures.
-    pub(super) fn layer_text(&mut self, layer: &mut Layer, properties: &[Prop<'a>], position: (i32, i32), outcome: usize, ctl: &Interrupt<'_>) -> Result<()> {
+    fn layer_text(
+        &mut self,
+        layer: &mut Layer,
+        flags: u32,
+        config: Option<(&str, &[u8])>,
+        position: (i32, i32),
+        outcome: usize,
+        ctl: &Interrupt<'_>,
+    ) -> Result<()> {
         ctl.check().map_err(|_| IoError::Cancelled)?;
         let (x, y) = position;
-        let flags = properties.iter().rfind(|p| p.kind == 26).and_then(|p| be_u32(p.data)).unwrap_or(0);
-        let mut config: Option<(&str, &[u8])> = None;
-        for property in properties.iter().filter(|p| p.kind == 21) {
-            let mut native = None;
-            let mut dynamic = None;
-            let scan = super::wire::scan_parasites_with_work(property.data, &mut self.parasite_work, ctl, |record| {
-                match record.name {
-                    b"gimp-text-layer" => native = Some(record.payload),
-                    b"plug_in_gdyntext/data" => dynamic = Some(record.payload),
-                    _ => {}
-                }
-                Ok(true)
-            })?;
-            if scan.limited {
-                return self.metadata_limit(
-                    outcome,
-                    "xcf.parasite_work",
-                    "Text parasite selection exceeded the shared scan-work allowance; saved pixels retained instead of choosing incomplete configuration",
-                );
-            }
-            if scan.malformed {
-                self.outcomes.notice(
-                    outcome,
-                    "xcf.parasite_framing",
-                    ConversionReason::InvalidOptionalData,
-                    (
-                        "Malformed optional layer parasite record".into(),
-                        "Valid preceding text configuration remains usable; original source retained inert within report limits".into(),
-                    ),
-                    Some("has malformed optional layer metadata; valid preceding records were preserved"),
-                    &mut self.warnings,
-                )?;
-            }
-            // Attach order is last-wins within each format, across all parasite
-            // properties; a native configuration always takes priority over legacy text.
-            let candidate = native.map(|data| ("gimp-text-layer", data)).or_else(|| dynamic.map(|data| ("plug_in_gdyntext/data", data)));
-            if let Some(candidate) = candidate
-                && (candidate.0 == "gimp-text-layer" || config.is_none_or(|(name, _)| name != "gimp-text-layer"))
-            {
-                config = Some(candidate);
-            }
-        }
         if flags & 2 != 0 {
             self.outcomes.notice(
                 outcome,
@@ -747,6 +730,10 @@ impl<'a> Image<'a> {
         let mut locks = photocraft_doc::Locks::default();
         let mut tag = LabelColor::None;
         let mut tattoo = None;
+        let mut malformed_parasites = false;
+        let mut native_text = None;
+        let mut legacy_text = None;
+        let mut text_flags = 0;
         for p in &lprops {
             let v = be_u32(p.data).unwrap_or(0);
             match p.kind {
@@ -762,7 +749,10 @@ impl<'a> Image<'a> {
                     x = be_i32(p.data).unwrap_or(0);
                     y = p.data.get(4..).and_then(be_i32).unwrap_or(0);
                 }
-                26 => text = true,
+                26 => {
+                    text = true;
+                    text_flags = v;
+                }
                 20 => tattoo = (v != 0).then_some(v),
                 28 => locks.pixels = v != 0,
                 29 if p.data.is_empty() => group = true,
@@ -778,12 +768,20 @@ impl<'a> Image<'a> {
                     let scan = super::wire::scan_parasites_with_work(p.data, &mut self.parasite_work, ctl, |record| {
                         match record.name {
                             b"gimphoto-clipped" => clipped = true,
-                            b"gimp-text-layer" | b"plug_in_gdyntext/data" => text = true,
+                            b"gimp-text-layer" => {
+                                text = true;
+                                native_text = Some(record.payload);
+                            }
+                            b"plug_in_gdyntext/data" => {
+                                text = true;
+                                legacy_text = Some(record.payload);
+                            }
                             _ => {}
                         }
                         Ok(true)
                     })?;
                     parasites_limited |= scan.limited;
+                    malformed_parasites |= scan.malformed;
                 }
                 _ => {}
             }
@@ -886,7 +884,9 @@ impl<'a> Image<'a> {
             self.layer_vector_style(layer.id, outcome, property.data, ctl)?;
         }
         if text && !group && !parasites_limited {
-            self.layer_text(&mut layer, &lprops, (x, y), outcome, ctl)?;
+            self.note_malformed_text_parasites(outcome, malformed_parasites)?;
+            let config = native_text.map(|data| ("gimp-text-layer", data)).or_else(|| legacy_text.map(|data| ("plug_in_gdyntext/data", data)));
+            self.layer_text(&mut layer, text_flags, config, (x, y), outcome, ctl)?;
         }
         self.retain_layer_properties(outcome, &lprops, ctl)?;
         if mptr != 0 {
@@ -896,7 +896,7 @@ impl<'a> Image<'a> {
             write_pixels(&mut surface, &px, x, y, &mut self.budget)?;
             let mask_outcome = self.outcomes.push(ConversionEntry {
                 feature_code: "xcf.layer_mask".into(),
-                source: conversion::source("layer_mask", ordinal, mptr, &mname, &path, mprops.iter().find(|p| p.kind == 20).and_then(|p| be_u32(p.data))),
+                source: conversion::source("layer_mask", ordinal, mptr, &mname, &path, mprops.iter().rfind(|p| p.kind == 20).and_then(|p| be_u32(p.data))),
                 targets: vec![NativeTargetRef { layer_id: Some(layer.id), label: "Layer mask".into(), ..Default::default() }],
                 disposition: if self.precision.reduces_precision() {
                     ConversionDisposition::NativeApproximation

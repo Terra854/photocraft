@@ -100,6 +100,9 @@ fn duplicate_resolution_properties_warn_only_for_the_effective_last_valid_pair()
             historical_unequal,
             "{name}"
         );
+        let superseded =
+            report.entries.iter().filter(|entry| entry.feature_code == "xcf.resolution" && entry.native_description.starts_with("Superseded")).count();
+        assert_eq!(superseded, historical_unequal - usize::from(effective.0 != effective.1), "{name}");
         let saved = photocraft_format::save_to_bytes(&imported.document, &Default::default()).unwrap();
         let reopened = photocraft_format::load_from_bytes(&saved).unwrap();
         assert_eq!(reopened.resolution_dpi, effective.0, "{name}");

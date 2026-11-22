@@ -140,18 +140,24 @@ fn known_order_blocks_are_removed_when_source_choice_is_reset_or_layer_is_raster
 }
 
 #[test]
-fn private_order_metadata_cannot_turn_an_empty_raster_into_an_unknown_adjustment() {
+fn private_appearance_or_order_metadata_cannot_turn_an_empty_raster_into_an_unknown_adjustment() {
     let mut doc = Document::new("empty raster", Size::new(1, 1), ColorMode::Rgb, SampleType::U8);
     doc.layers.push(Layer::raster("Empty", doc.pixel_format()));
-    for bytes in [crate::smart_xcf_order::encode(Order::LittleEndian), vec![0, 0, 0, 2, 0, 0, 0, 1], vec![1, 2, 3]] {
+    for (key, bytes) in [
+        (crate::smart_xcf_order::PSD_KEY, crate::smart_xcf_order::encode(Order::LittleEndian)),
+        (crate::smart_xcf_order::PSD_KEY, vec![0, 0, 0, 2, 0, 0, 0, 1]),
+        (crate::smart_xcf_order::PSD_KEY, vec![1, 2, 3]),
+        (crate::psd_appearance::PSD_KEY, vec![0, 0, 0, 2, 0, 0, 0, 1]),
+        (crate::psd_appearance::PSD_KEY, vec![1, 2, 3]),
+    ] {
         let mut file = document_to_psd(&doc).unwrap();
         let record = &mut file.layer_info.as_mut().unwrap().layers[0];
         assert!(record.rect.is_empty());
         record.flags = LayerFlags(LayerFlags::BIT4_USEFUL | LayerFlags::PIXEL_DATA_IRRELEVANT);
-        record.blocks.push(TaggedBlock::new(crate::smart_xcf_order::PSD_KEY, bytes.clone()));
+        record.blocks.push(TaggedBlock::new(key, bytes.clone()));
         let imported = crate::import("empty-raster.psd", &file.to_bytes().unwrap()).unwrap().document;
         assert!(matches!(imported.layers[0].content, LayerContent::Raster(_)));
-        assert!(imported.layers[0].psd_blocks.iter().any(|(key, raw)| key == &crate::smart_xcf_order::PSD_KEY && raw.as_slice() == bytes.as_slice()));
+        assert!(imported.layers[0].psd_blocks.iter().any(|(found, raw)| *found == key && raw.as_slice() == bytes.as_slice()));
     }
 }
 

@@ -86,9 +86,16 @@ pub struct MemoryPrompt {
     pub uncertain_capacity_warning: bool,
 }
 
+fn placing(app: &PhotocraftApp) -> bool {
+    use crate::state::MadeLayer;
+    app.jobs.place.is_some()
+        || app.ui.transform.as_ref().is_some_and(|transform| transform.made == Some(MadeLayer::Place))
+        || app.transform_preparing.as_ref().is_some_and(|preparing| preparing.made == Some(MadeLayer::Place))
+}
+
 /// Whether a file that just finished reading has to wait: one earlier in the queue does.
 pub fn waiting(app: &PhotocraftApp) -> bool {
-    app.jobs.place.is_some()
+    placing(app)
         || !app.held_opens.is_empty()
         || !app.held_memory_prompts.is_empty()
         || !app.historical_opens.is_empty()
@@ -178,7 +185,7 @@ pub(crate) fn answer_prompt(app: &mut PhotocraftApp, _ctx: &egui::Context, answe
 
 /// Opens queued files in order until one needs its prompt, which is shown if it isn't yet.
 pub fn advance(app: &mut PhotocraftApp) {
-    if app.jobs.place.is_some() || app.historical_replacements.applying() {
+    if placing(app) || app.historical_replacements.applying() {
         return;
     }
     // Reconcile legacy callers that populated held queues directly.
@@ -233,7 +240,7 @@ pub fn advance(app: &mut PhotocraftApp) {
                 if let Err(error) = open(app, held, None) {
                     app.open_failed(&name, &error);
                 }
-                if has_open_dialog(app) {
+                if placing(app) || has_open_dialog(app) {
                     return;
                 }
             }

@@ -155,11 +155,10 @@ fn limited_text_selection_does_not_choose_a_prefix_before_a_later_modern_record(
     let modern = br#"(text "modern wins")"#;
     let last = record(&mut data, b"gimp-text-layer", modern);
     let full_scan = prefix + last;
-    // Flag selection completes, but text selection cannot establish the last native
-    // configuration. Using the valid legacy prefix would guess a different document.
-    let imported = import(&source(&data, 1), full_scan + prefix);
+    // Using the valid legacy prefix would guess a different document.
+    let imported = import(&source(&data, 1), prefix);
     assert_pixels_and_loss(&imported, 1);
-    let complete = import(&source(&data, 1), full_scan * 3);
+    let complete = import_with_limits(&source(&data, 1), full_scan, full_scan);
     let photocraft_doc::LayerContent::Text(text) = &complete.document.layers[0].content else { panic!("complete selection remains editable") };
     assert_eq!(text.text, "modern wins");
 }
@@ -238,7 +237,7 @@ fn image_and_earlier_layer_report_scans_cannot_spend_later_text_admission() {
             earlier.props.push((21, large));
             image.layers.push(earlier);
         }
-        let native = large_cost * if image_owner { 2 } else { 1 } + text_cost * 2;
+        let native = large_cost * if image_owner { 2 } else { 1 } + text_cost;
         let imported = import_with_limits(&image.write(), native, 64);
         let layer = imported.document.layers.iter().find(|layer| layer.name == "Text").unwrap();
         let photocraft_doc::LayerContent::Text(text) = &layer.content else { panic!("report work discarded native text for image owner {image_owner}") };
@@ -246,4 +245,23 @@ fn image_and_earlier_layer_report_scans_cannot_spend_later_text_admission() {
         let Some(ImportConversion::Report(report)) = imported.document.metadata.import_conversion.as_deref() else { panic!("report") };
         assert!(report.entries.iter().any(|entry| entry.reason == ConversionReason::RetentionLimit), "the separate report allowance was exhausted");
     }
+}
+
+#[test]
+fn malformed_icc_suffix_uses_implicit_profile_until_a_later_record_establishes_precedence() {
+    let p3 = craft_cms::Builtin::DisplayP3.profile().to_bytes();
+    let mut data = Vec::new();
+    record(&mut data, b"icc-profile", &p3);
+    record(&mut data, b"icc-profile", b"short");
+    data.pop();
+    let mut image = TestImage::rgb8(1, 1);
+    image.image_props.push((21, data));
+    let imported = crate::import("bad-profile.xcf", &image.write()).unwrap();
+    assert_eq!(imported.document.icc_profile.unwrap(), craft_cms::Builtin::Srgb.profile().to_bytes());
+    assert!(imported.warnings.iter().any(|warning| warning.contains("final ICC assignment")), "{:?}", imported.warnings);
+    let mut valid = Vec::new();
+    record(&mut valid, b"icc-profile", &p3);
+    image.image_props.push((21, valid));
+    let imported = crate::import("new-profile.xcf", &image.write()).unwrap();
+    assert_eq!(imported.document.icc_profile.unwrap(), p3);
 }

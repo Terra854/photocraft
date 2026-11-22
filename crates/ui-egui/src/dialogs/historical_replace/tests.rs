@@ -706,6 +706,38 @@ fn edit_contents_prompts_for_a_legacy_embedded_xcf_and_keeps_the_choice() {
 }
 
 #[test]
+fn deferred_edit_contents_keeps_the_original_automation_gate() {
+    let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
+    app.session
+        .edit("Legacy source", |doc, _| {
+            let LayerContent::Smart(object) = &mut doc.layers[0].content else { panic!("smart object") };
+            object.historical_xcf_sample_order = None;
+            Ok(())
+        })
+        .unwrap();
+    app.services.automation_command = Some(Box::new(|command, params| {
+        if command == "layer.smartObjects.editContents" && params["historicalXcfSampleOrder"].is_string() {
+            return Err("the selected sample order was denied".into());
+        }
+        Ok(())
+    }));
+    let layer = app.session.active().unwrap().active_layer.unwrap();
+    let bytes = fixture::historical_pixel(false);
+    let question = photocraft_io::historical_xcf_sample_order_request("old.xcf", &bytes).unwrap().unwrap();
+    app.automation_input = true;
+    // Automated commands ordinarily return the typed question to their caller.
+    // Exercise the deferred dialog's origin independently of that interception.
+    assert!(prompt_edit(&mut app, layer, "old.xcf".into(), question).unwrap()["heldHistoricalXcfEdit"].is_u64());
+    app.automation_input = false;
+    let id = dialogs(&app).into_iter().find(|dialog| owns(&dialog.fields)).unwrap().id;
+    set_order(&mut app, id, json!("big-endian"));
+    confirm(&mut app, id).unwrap();
+    assert!(app.ui.status_error && app.ui.status.contains("selected sample order"), "{}", app.ui.status);
+    assert_eq!(app.session.documents().len(), 1);
+    assert_eq!(object(&app).historical_xcf_sample_order, None);
+}
+
+#[test]
 fn background_replacement_reports_completed_import_warnings() {
     let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
     let id = photocraft_engine::jobs::JobId(87);
@@ -872,7 +904,7 @@ fn relink_keeps_the_picker_automation_policy_for_plain_and_probed_sources() {
 }
 
 #[test]
-fn replacement_resumes_only_after_tracked_placement_completes() {
+fn replacement_resumes_only_after_the_placement_transform_completes() {
     let picked = modern_pick(false);
     let mut app = app(vec![Some(picked)], HistoricalXcfSampleOrder::BigEndian);
     app.session.set_cooperative_jobs(true);
@@ -891,10 +923,14 @@ fn replacement_resumes_only_after_tracked_placement_completes() {
         tick_probe(&mut app);
     }
     assert!(app.jobs.place.is_none());
+    assert!(app.ui.transform.is_some());
+    assert_eq!(app.historical_replacements.len(), 1);
+    crate::transform_tool::commit(&mut app);
+    crate::open_prompt::take(&mut app, &egui::Context::default());
     assert!(app.historical_replacements.is_empty());
     assert!(app.prompt_order.is_empty());
     assert_eq!(app.session.active().unwrap().doc.layers.len(), 2);
-    assert!(app.ui.transform.is_some() || app.transform_preparing.is_some());
+    assert!(app.ui.transform.is_none() && app.transform_preparing.is_none());
     assert!(app.ui.status.contains("target changed"), "{}", app.ui.status);
 }
 

@@ -169,7 +169,38 @@ fn resolved_files(s: &Session, st: &crate::DocState) -> Vec<ResolvedLink> {
         .collect()
 }
 
+fn historical_link_digests(document: &Document) -> BTreeMap<&str, BTreeSet<[u8; 32]>> {
+    let mut paths = BTreeMap::<_, BTreeSet<_>>::new();
+    for (_, _, layer) in document.walk() {
+        if let LayerContent::Smart(smart) = &layer.content
+            && let SmartSource::Linked { path } = &smart.source
+            && let Some(digest) = smart.historical_xcf_link_digest
+        {
+            paths.entry(path.as_str()).or_default().insert(digest);
+        }
+    }
+    paths
+}
+
 impl Session {
+    /// A history step can restore a different expected fingerprint at the same stored path.
+    pub(crate) fn invalidate_link_digests_for_history(&mut self, before: Option<Arc<Document>>) {
+        let (Some(before), Some(after)) = (before, self.active().map(|state| Arc::clone(state.doc()))) else { return };
+        if Arc::ptr_eq(&before, &after) || (self.link_scan.is_none() && !self.link_stamps.keys().any(|(id, _)| *id == after.id.0)) {
+            return;
+        }
+        let old = historical_link_digests(&before);
+        let new = historical_link_digests(&after);
+        if old != new {
+            self.link_scan = None;
+            for ((doc, path), stamp) in &mut self.link_stamps {
+                if *doc == after.id.0 && old.get(path.as_str()) != new.get(path.as_str()) {
+                    stamp.digest_checked = false;
+                }
+            }
+        }
+    }
+
     /// Save As can change what a stored path names. Discard the pending look and
     /// forget any prior stamp whose resolved source changed, including its digest.
     pub(crate) fn invalidate_link_scan_for_save(&mut self, doc: u64, before: Option<&str>, after: &str) {
@@ -351,6 +382,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use photocraft_doc::LayerContent;
     use photocraft_geom::Rect;
     use serde_json::json;
 
@@ -454,6 +486,37 @@ mod tests {
         assert!(result["warnings"][0].as_str().unwrap().contains("relink and choose"));
         assert!(std::sync::Arc::ptr_eq(&s.active().unwrap().doc, &before));
         assert_eq!(s.execute("layer.smartObjects.updateChanged", json!({})).unwrap(), json!({"updated":[]}));
+    }
+
+    #[test]
+    fn undo_redo_and_rollback_recheck_the_restored_historical_digest_at_the_same_stamp() {
+        use crate::jobs::historical_xcf_fixture::historical_pixel;
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("historical.xcf");
+        let original = historical_pixel(false);
+        let replacement = historical_pixel(true);
+        std::fs::write(&path, &original).unwrap();
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width":1,"height":1})).unwrap();
+        let id = s.execute("file.placeLinked", json!({"path":path,"historicalXcfSampleOrder":"big-endian"})).unwrap()["layer"].as_u64().unwrap();
+        let relink = |s: &mut Session, expected: &[u8]| {
+            s.edit("Restore source assignment", |doc, _| {
+                let LayerContent::Smart(object) = &mut doc.layer_mut(photocraft_doc::LayerId(id)).unwrap().content else { panic!("smart object") };
+                object.historical_xcf_link_digest = Some(photocraft_io::linked::historical_xcf_digest(expected));
+                Ok(())
+            })
+            .unwrap();
+        };
+        let look = |s: &mut Session| s.execute("layer.smartObjects.updateChanged", json!({})).unwrap()["warnings"].is_array();
+        relink(&mut s, &replacement);
+        assert!(look(&mut s));
+        assert!(s.undo());
+        assert!(!look(&mut s));
+        assert!(s.redo());
+        assert!(look(&mut s));
+        relink(&mut s, &original);
+        assert!(s.rollback());
+        assert!(look(&mut s));
     }
 
     #[test]

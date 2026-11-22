@@ -59,7 +59,8 @@ fn pre_cancelled_metadata_changes_neither_document_view_budget_nor_report() {
 
 #[test]
 fn cancellation_interrupts_guide_records_and_uncancelled_guides_keep_their_order() {
-    let payload = guides(4096);
+    let coordinates: Vec<i32> = (0..4096).map(|index| (index * 3) % 4096 - 2048).collect();
+    let payload: Vec<_> = coordinates.iter().flat_map(|coordinate| coordinate.to_be_bytes().into_iter().chain([1])).collect();
     let properties = [Prop { kind: 18, data: &payload, offset: 0 }];
     for cancel_at in [None, Some(11), Some(4107)] {
         let mut doc = Document::new("Guides", Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
@@ -90,7 +91,7 @@ fn cancellation_interrupts_guide_records_and_uncancelled_guides_keep_their_order
             }
         } else {
             result.unwrap();
-            assert_eq!(doc.guides.horizontal, vec![1.; 4096]);
+            assert_eq!(doc.guides.horizontal, coordinates.iter().copied().map(f64::from).collect::<Vec<_>>());
             assert!(doc.guides.vertical.is_empty());
         }
     }
@@ -119,5 +120,22 @@ fn cancellation_interrupts_sampler_scans_even_after_native_capacity_is_full() {
                 assert!(calls.load(Ordering::Relaxed) >= 4096);
             }
         }
+    }
+}
+
+#[test]
+fn legacy_samplers_are_used_only_when_modern_is_truncated_before_the_first_record() {
+    let legacy = [1_i32.to_be_bytes(), 2_i32.to_be_bytes()].concat();
+    let modern = [3_i32.to_be_bytes(), 4_i32.to_be_bytes(), [0; 4], [0; 4], [0; 4]].concat();
+    for (data, expected) in [(&modern[..8], vec![[1., 2.]]), (&modern[..0], vec![]), (modern.as_slice(), vec![[3., 4.]])] {
+        let mut doc = Document::new("samplers", Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
+        let props = [Prop { offset: 0, kind: 39, data }, Prop { offset: 32, kind: 27, data: &legacy }];
+        let (mut outcomes, owner) = outcomes();
+        let mut view = NativeInitialView::default();
+        let mut warnings = crate::ora::Warnings::default();
+        let mut budget = usize::MAX;
+        image(&mut doc, &props, 26, &mut view, &mut outcomes, owner, &mut budget, &mut warnings, &Interrupt::NONE).unwrap();
+        assert_eq!(view.samplers, expected);
+        assert_eq!(warnings.finish().iter().any(|warning| warning.contains("truncated modern sample-position")), data.len() == 8);
     }
 }

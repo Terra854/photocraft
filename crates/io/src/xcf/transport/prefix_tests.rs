@@ -50,11 +50,11 @@ fn unknown_gzip_is_rejected_after_a_bounded_signature_not_the_svg_output_budget(
     for name in ["unrelated.bin", "unrelated.psd"] {
         calls.store(0, Ordering::Relaxed);
         DECODER_STARTS.set(0);
-        // A full decode would cross this injected budget long before EOF. Returning
-        // None proves the unclaimed body was not inflated up to the SVG limit.
+        SVG_PROBE_OUTPUT.set(0);
         assert!(decode_stream(name, &compressed, &ctl, SVG_PROBE_BYTES * 2, false, true).unwrap().is_none());
         assert!(calls.load(Ordering::Relaxed) < 64);
         assert_eq!(DECODER_STARTS.get(), 1);
+        assert_eq!(SVG_PROBE_OUTPUT.get() + MAGIC.len(), SVG_PROBE_BYTES);
     }
     let expected = crate::import_with_options_as("unrelated.psd", &compressed, Some("psd"), &crate::ImportOptions::default()).unwrap_err().to_string();
     let actual = crate::import("unrelated.psd", &compressed).unwrap_err().to_string();

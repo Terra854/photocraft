@@ -1254,6 +1254,11 @@ fn canvas_size_preserves_and_translates_saved_xcf_shape_pixels() {
         let original_area = Rect::new(dx, dy, 40 + dx, 40 + dy);
         assert_eq!(photocraft_compose::render(doc(&s), original_area).px, original.px);
         assert!(orange_at(&shape, 16 + dx, 16 + dy));
+        let area = Rect::new(dx + 4, dy + 6, dx + 34, dy + 36);
+        let expected = photocraft_compose::render(doc(&s), area);
+        s.execute("image.crop", json!({"x":area.x0,"y":area.y0,"width":30,"height":30})).unwrap();
+        assert!(shape_layer(doc(&s), id).cache_preserves_appearance);
+        assert_eq!(photocraft_compose::render(doc(&s), doc(&s).bounds()).px, expected.px);
     }
 }
 

@@ -115,6 +115,10 @@ fn resume_place(app: &mut PhotocraftApp, id: u64, doc: DocId, name: &str, order:
     let started = match started {
         Ok(started) => started,
         Err(error) => {
+            if !app.session.holds_historical_xcf_open(id) {
+                app.historical_opens.retain(|held| held.id != id);
+                app.prompt_order.retain(|kind| *kind != PromptKind::Historical(id));
+            }
             crate::open_prompt::advance(app);
             return Err(error);
         }

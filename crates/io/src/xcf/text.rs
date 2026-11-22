@@ -577,7 +577,7 @@ pub(super) fn decode_with_work(
     if let Some(font) = field(&fields, "font")? {
         match font {
             [Value::Atom(name)] if name != b"NULL" => {
-                font_description(std::str::from_utf8(name).map_err(|_| invalid("invalid font name UTF-8"))?, &mut style, dpi, false, &mut notes)?
+                font_description(std::str::from_utf8(name).map_err(|_| invalid("invalid font name UTF-8"))?, &mut style, dpi, false, &mut notes)?;
             }
             [Value::Atom(kind), rest @ ..] if kind == b"GimpFont" => {
                 requested_font(rest, &mut style)?;
@@ -1049,7 +1049,7 @@ fn features(text: &str) -> Result<Vec<FontFeature>> {
 
 /// Public Pango font-description grammar, translated into ordinary native font
 /// requests/styles. Unsupported request options remain historical notes.
-fn font_description(source: &str, style: &mut CharStyle, dpi: f64, apply_size: bool, notes: &mut Vec<String>) -> Result<()> {
+fn font_description(source: &str, style: &mut CharStyle, dpi: f64, apply_size: bool, notes: &mut Vec<String>) -> Result<bool> {
     if source.len() > super::MAX_STRING {
         return Err(invalid("font description exceeds limit"));
     }
@@ -1084,6 +1084,7 @@ fn font_description(source: &str, style: &mut CharStyle, dpi: f64, apply_size: b
         }
         break;
     }
+    let mut sized = false;
     if let Some(word) = words.last().copied() {
         let (number, pixels) = word.strip_suffix("px").map_or((word, false), |number| (number, true));
         if let Ok(size) = number.parse::<f32>() {
@@ -1091,6 +1092,7 @@ fn font_description(source: &str, style: &mut CharStyle, dpi: f64, apply_size: b
                 return Err(invalid("font description size exceeds native bounds"));
             }
             if apply_size {
+                sized = true;
                 style.size_pt = if pixels { (f64::from(size) * 72. / dpi) as f32 } else { size };
             }
             words.pop();
@@ -1130,10 +1132,11 @@ fn font_description(source: &str, style: &mut CharStyle, dpi: f64, apply_size: b
     for word in &style_names {
         let option = word.to_ascii_lowercase().replace('-', "");
         match option.as_str() {
-            "normal" | "roman" | "regular" => {
+            "normal" | "roman" => {
                 style.weight = 400;
                 style.italic = false;
             }
+            "regular" => style.weight = 400,
             "italic" | "oblique" => style.italic = true,
             "smallcaps" => style.caps = Caps::SmallCaps,
             "ultracondensed" => style.horizontal_scale = 0.5,
@@ -1166,7 +1169,7 @@ fn font_description(source: &str, style: &mut CharStyle, dpi: f64, apply_size: b
     if apply_size && (!style.size_pt.is_finite() || !(0.001..=8192.).contains(&style.size_pt)) {
         return Err(crate::IoError::Unsupported("font description size is outside the native editable range".into()));
     }
-    Ok(())
+    Ok(sized)
 }
 
 /// Named weights shared by GIMP's font descriptions and Pango markup.
@@ -1383,6 +1386,7 @@ fn markup_runs_with_attribute_allowance(
         // Pango selects size and scale independently. Nested percentages replace
         // the active scale; an absolute size does not discard inherited scale.
         let mut unscaled_size = base.size_pt;
+        let mut explicit_size = false;
         let mut size_scale = 1.0;
         let mut spacing_pt = base.tracking * base.size_pt / 1000.;
         let mut letter_spaced = false;
@@ -1399,7 +1403,7 @@ fn markup_runs_with_attribute_allowance(
                     style.weight = font.weight;
                     style.italic = font.italic;
                 } else {
-                    font_description(requested, &mut style, dpi, true, notes)?;
+                    explicit_size |= font_description(requested, &mut style, dpi, true, notes)?;
                     variant = style.caps;
                 }
             }
@@ -1418,6 +1422,8 @@ fn markup_runs_with_attribute_allowance(
                 "sub" => style.baseline = FontBaseline::Subscript,
                 "sup" => style.baseline = FontBaseline::Superscript,
                 "tt" => style.font_family = "monospace".into(),
+                "big" if explicit_size => unscaled_size *= 1.2,
+                "small" if explicit_size => unscaled_size /= 1.2,
                 "big" => size_scale *= 1.2,
                 "small" => size_scale /= 1.2,
                 _ => note(notes, format!("Source markup element {} is retained without native formatting", diagnostic_value(ancestor.name.as_str()))),
@@ -1452,17 +1458,23 @@ fn markup_runs_with_attribute_allowance(
                         };
                     }
                     "style" | "font_style" => {
-                        style.italic = match value {
-                            "normal" => false,
-                            "italic" | "oblique" => true,
-                            _ => return Err(invalid("invalid markup font style")),
+                        style.italic = if value.eq_ignore_ascii_case("normal") {
+                            false
+                        } else if value.eq_ignore_ascii_case("italic") || value.eq_ignore_ascii_case("oblique") {
+                            true
+                        } else {
+                            return Err(invalid("invalid markup font style"));
+                        };
+                    }
+                    "variant" | "font_variant" => {
+                        if value.eq_ignore_ascii_case("normal") {
+                            variant = Caps::Normal;
+                        } else if value.eq_ignore_ascii_case("small-caps") || value.eq_ignore_ascii_case("smallcaps") {
+                            variant = Caps::SmallCaps;
+                        } else {
+                            note(notes, format!("Source font variant {} remains inert", diagnostic_value(value)));
                         }
                     }
-                    "variant" | "font_variant" => match value {
-                        "normal" => variant = Caps::Normal,
-                        "small-caps" => variant = Caps::SmallCaps,
-                        _ => note(notes, format!("Source font variant {} remains inert", diagnostic_value(value))),
-                    },
                     "stretch" | "font_stretch" => {
                         style.horizontal_scale = match value {
                             "ultracondensed" => 0.5,
@@ -1539,12 +1551,17 @@ fn markup_runs_with_attribute_allowance(
                             "large" => size_scale = 1.2,
                             "x-large" => size_scale = 1.2 * 1.2,
                             "xx-large" => size_scale = 1.2 * 1.2 * 1.2,
+                            "smaller" if explicit_size => unscaled_size /= 1.2,
+                            "larger" if explicit_size => unscaled_size *= 1.2,
                             "smaller" => size_scale /= 1.2,
                             "larger" => size_scale *= 1.2,
                             s if s.ends_with('%') => {
                                 size_scale = s.trim_end_matches('%').parse::<f32>().map_err(|_| invalid("invalid markup font percentage"))? / 100.;
                             }
-                            s => unscaled_size = pango_points(s)?,
+                            s => {
+                                unscaled_size = pango_points(s)?;
+                                explicit_size = true;
+                            }
                         };
                     }
                     "alpha" | "foreground_alpha" | "fgalpha" => {

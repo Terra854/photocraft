@@ -232,3 +232,18 @@ fn svg_stack_and_source_caches_refuse_omitted_images() {
     }
     assert!(stack_image("Complete.svg", SVG, PixelFormat::RGBA32F, photocraft_doc::StackMode::Mean).is_ok());
 }
+
+#[test]
+fn layered_native_sources_share_the_stack_mode_frame_budget() {
+    let mut doc = Document::new("Stack source", photocraft_geom::Size::new(4096, 4096), photocraft_doc::ColorMode::Rgb, photocraft_doc::SampleType::F32);
+    let fmt = doc.pixel_format();
+    for _ in 0..8 {
+        doc.layers.push(Layer::raster("Sparse", fmt));
+    }
+    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    let error = stack_image("large.pcraft", &bytes, fmt, photocraft_doc::StackMode::Mean).unwrap_err();
+    assert!(error.to_string().contains("1 GiB Stack Mode"), "{error}");
+    doc.size = photocraft_geom::Size::new(8, 8);
+    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    assert!(stack_image("small.pcraft", &bytes, fmt, photocraft_doc::StackMode::Mean).is_ok());
+}

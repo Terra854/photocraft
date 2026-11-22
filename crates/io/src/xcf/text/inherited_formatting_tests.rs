@@ -123,3 +123,18 @@ fn opaque_foregrounds_inherit_alpha_and_explicit_span_alpha_still_wins() {
     assert_eq!(runs.iter().map(|run| run.style.color.alpha).collect::<Vec<_>>(), [0.25, 128. / 255., 0.5, 0.5]);
     assert!(runs.iter().all(|run| run.style.color.c == Color::rgb(1., 0., 0.).c));
 }
+
+#[test]
+fn pango_case_variants_and_absolute_size_precedence_survive_import() {
+    let markup = r#"<markup><span font_desc="Sans Italic Regular 12">a</span><span font_style="Italic" variant="Small-Caps">b</span><span font_variant="smallcaps">c</span><span size="30pt"><big>d<span size="40pt">e</span></big><span size="150%"><span size="40pt">f</span></span></span></markup>"#;
+    let (text, runs) = markup_runs(markup, &CharStyle::default(), &HashMap::new(), 72., &mut Vec::new()).unwrap();
+    assert_eq!(text, "abcdef");
+    let styles: Vec<_> = runs.iter().flat_map(|run| std::iter::repeat_n(&run.style, run.len)).collect();
+    assert!(styles[0].italic);
+    assert!(styles[1].italic);
+    assert_eq!(styles[1].caps, Caps::SmallCaps);
+    assert_eq!(styles[2].caps, Caps::SmallCaps);
+    assert!((styles[3].size_pt - 36.).abs() < 0.001);
+    assert_eq!(styles[4].size_pt, 40.);
+    assert_eq!(styles[5].size_pt, 60.);
+}

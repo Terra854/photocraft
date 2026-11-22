@@ -365,6 +365,9 @@ impl<'a> Image<'a> {
             if p == 0 {
                 return Err(invalid("the tile list ends before every tile"));
             }
+            if tiles.last().is_some_and(|&previous| p <= previous) {
+                return Err(invalid("tile offsets must increase"));
+            }
             tiles.push(p);
         }
         if l.ptr_wire()? != 0 {
@@ -381,7 +384,7 @@ impl<'a> Image<'a> {
             }
             let (tx, ty) = ((i % across) as u32, (i / across) as u32);
             let (tw, th) = ((w - tx * TILE).min(TILE), (h - ty * TILE).min(TILE));
-            let end = tiles.get(i + 1).copied().filter(|&n| n > at).unwrap_or(self.c.b.len());
+            let end = tiles.get(i + 1).copied().unwrap_or(self.c.b.len());
             let raw = decode_tile(&self.c, at, end, self.compression, bpp, (tw * th) as usize)?;
             let (first, row_stride) = if target.is_some() {
                 (0, tw as usize * channels)
@@ -987,6 +990,7 @@ struct ImageMetadata<'a> {
     icc: Option<Vec<u8>>,
     parasite_work: wire::ParasiteWork,
     parasites_limited: bool,
+    icc_framing_unknown: bool,
 }
 
 /// Indexed palette validity is essential; unused palette bytes remain optional source data.
@@ -1028,6 +1032,7 @@ fn read_image_metadata_with_work<'a>(
     let mut compression = Compression::None;
     let mut colormap = Vec::new();
     let mut selected_icc = None;
+    let mut icc_framing_unknown = false;
     let mut parasites_limited = false;
     for p in &image_props {
         match p.kind {
@@ -1050,8 +1055,11 @@ fn read_image_metadata_with_work<'a>(
                     Ok(true)
                 })?;
                 parasites_limited |= scan.limited;
-                if let Some(data) = last {
+                if scan.malformed {
+                    icc_framing_unknown = true;
+                } else if let Some(data) = last {
                     selected_icc = Some(data);
+                    icc_framing_unknown = false;
                 }
             }
             _ => {}
@@ -1060,9 +1068,9 @@ fn read_image_metadata_with_work<'a>(
     // The property allowance is also the fixed prerequisite-profile copy bound. Scan every
     // record first so only the final assignment is copied, never unused parasites/profiles.
     ctl.check().map_err(|_| IoError::Cancelled)?;
-    let icc = selected_icc.filter(|_| !parasites_limited).map(<[u8]>::to_vec);
+    let icc = selected_icc.filter(|_| !parasites_limited && !icc_framing_unknown).map(<[u8]>::to_vec);
     ctl.check().map_err(|_| IoError::Cancelled)?;
-    Ok(ImageMetadata { properties: image_props, compression, colormap, icc, parasite_work, parasites_limited })
+    Ok(ImageMetadata { properties: image_props, compression, colormap, icc, parasite_work, parasites_limited, icc_framing_unknown })
 }
 
 pub(crate) fn source_geometry(name: &str, bytes: &[u8], ctl: &Interrupt<'_>) -> Result<Option<((f64, f64), f64)>> {
@@ -1118,10 +1126,11 @@ fn import_with_sample_order_and_parasite_work(
         warnings.note("64-bit floating-point samples open as native F32 with reduced precision");
     }
 
-    let ImageMetadata { properties: image_props, compression, colormap, icc, parasite_work, parasites_limited } =
+    let ImageMetadata { properties: image_props, compression, colormap, icc, parasite_work, parasites_limited, icc_framing_unknown } =
         read_image_metadata_with_work(&mut c, version, base_type == 2, parasite_work, ctl)?;
     let assigned_profile = icc.is_some();
-    let color::ProfileSelection { bytes: native_profile, fallback_reason, tag_document } = select_image_profile(mode, precision, icc, parasites_limited)?;
+    let color::ProfileSelection { bytes: native_profile, fallback_reason, tag_document } =
+        select_image_profile(mode, precision, icc, parasites_limited, icc_framing_unknown)?;
     if let Some(reason) = &fallback_reason {
         warnings.note(&format!(
             "The assigned ICC profile could not be used: {reason}. Original samples use the implicit {} profile for their encoding; assigned colorants could not be preserved",
@@ -1290,12 +1299,7 @@ fn import_with_sample_order_and_parasite_work(
     document.channels = channels;
     document.selection = selection;
     document.icc_profile = tag_document.then(|| native_profile.clone());
-    let mut color_outcome = color_encoding_outcome(assigned_profile, precision, fallback_reason, tag_document);
-    if parasites_limited {
-        color_outcome.source_description = "Image parasite scan was incomplete; the final source ICC assignment is unknown".into();
-        color_outcome.reason = ConversionReason::RetentionLimit;
-    }
-    image.outcomes.push(color_outcome)?;
+    image.outcomes.push(color_encoding_outcome(assigned_profile, precision, fallback_reason, tag_document, parasites_limited, icc_framing_unknown))?;
     import_paths(&mut document, &mut image, &image_props, &path_ptrs, omitted_paths, ctl)?;
     import_vectors(&mut document, &mut image, ctl)?;
     text::convert_colors(&mut document, &native_profile)?;
@@ -1318,18 +1322,34 @@ fn import_with_sample_order_and_parasite_work(
 }
 
 /// Preserve the existing implicit-profile fallback when final ICC selection is unknown.
-fn select_image_profile(mode: ColorMode, precision: Precision, icc: Option<Vec<u8>>, parasites_limited: bool) -> Result<color::ProfileSelection> {
+fn select_image_profile(
+    mode: ColorMode,
+    precision: Precision,
+    icc: Option<Vec<u8>>,
+    parasites_limited: bool,
+    icc_framing_unknown: bool,
+) -> Result<color::ProfileSelection> {
     let mut selection = color::select_profile(mode, precision, icc)?;
     if parasites_limited {
         selection.fallback_reason = Some("Image parasite scan work was exhausted before the final ICC assignment could be established".into());
+        selection.tag_document = true;
+    } else if icc_framing_unknown {
+        selection.fallback_reason = Some("Malformed image parasite framing prevented establishing the final ICC assignment".into());
         selection.tag_document = true;
     }
     Ok(selection)
 }
 
 /// Describe the effective color interpretation without claiming unusable assigned colorants.
-fn color_encoding_outcome(assigned_profile: bool, precision: Precision, fallback_reason: Option<String>, tag_document: bool) -> ConversionEntry {
-    ConversionEntry {
+fn color_encoding_outcome(
+    assigned_profile: bool,
+    precision: Precision,
+    fallback_reason: Option<String>,
+    tag_document: bool,
+    parasites_limited: bool,
+    icc_framing_unknown: bool,
+) -> ConversionEntry {
+    let mut color_outcome = ConversionEntry {
         feature_code: "xcf.color_encoding".into(),
         source: conversion::source("image", 0, 0, "", &[], None),
         targets: vec![NativeTargetRef { label: "Document color profile".into(), ..Default::default() }],
@@ -1354,7 +1374,15 @@ fn color_encoding_outcome(assigned_profile: bool, precision: Precision, fallback
             None => "Native ICC profile preserves the source colorants and sample transfer curve".into(),
         },
         attachments: Vec::new(),
+    };
+    if parasites_limited {
+        color_outcome.source_description = "Image parasite scan was incomplete; the final source ICC assignment is unknown".into();
+        color_outcome.reason = ConversionReason::RetentionLimit;
+    } else if icc_framing_unknown {
+        color_outcome.source_description = "Malformed image parasite framing leaves the final source ICC assignment unknown".into();
+        color_outcome.reason = ConversionReason::InvalidOptionalData;
     }
+    color_outcome
 }
 
 /// Report native compositing differences without changing imported content or its durable conversion report.
@@ -1708,6 +1736,8 @@ fn import_paths_with_work<'a>(
         }
         document.paths.push(path.named);
     }
+    image.initial_view.selected_path_identity =
+        image.initial_view.selected_path.and_then(|index| document.paths.get(index)).map(crate::initial_view::path_identity);
     // Raw source path properties are already covered by the image's bounded inert retention.
     Ok(())
 }

@@ -207,7 +207,7 @@ impl PropertyInput for Cursor<'_> {
         let declared = tables(declared)?;
         let repaired = tables(repaired)?;
         // A run of zeroes inside a property can resemble an empty table.
-        // A framed table with actual drawables is stronger evidence.
+        // A framed table with drawables or a standalone path is stronger evidence.
         Ok((declared != repaired).then_some(repaired > declared))
     }
 
@@ -259,6 +259,7 @@ pub(super) fn drawable_tables(
             first_drawable = Some(first_drawable.map_or(pointer, |first: usize| first.min(pointer)));
         }
     }
+    let mut last_path = None;
     if version >= 18 {
         for count in 0..=super::MAX_CHANNELS {
             ctl.check().map_err(|_| super::IoError::Cancelled)?;
@@ -267,14 +268,20 @@ pub(super) fn drawable_tables(
                 return Ok(None);
             }
             if pointer == 0 {
+                last_path = last_path.filter(|first| *first >= position);
                 break;
             }
             if count == super::MAX_CHANNELS {
                 return Ok(None);
             }
+            if let Ok(pointer) = usize::try_from(pointer)
+                && pointer.checked_add(12).is_some_and(|end| end <= upper_bound)
+            {
+                last_path = Some(last_path.map_or(pointer, |farthest: usize| farthest.max(pointer)));
+            }
         }
     }
-    Ok(Some(first_drawable.is_some()))
+    Ok(Some(first_drawable.is_some() || last_path.is_some()))
 }
 
 pub(super) fn property_header(input: &mut impl PropertyInput, count: usize) -> Result<Option<(u32, usize)>> {
@@ -307,7 +314,11 @@ pub(super) fn property_payload(
                 if colors > 256 {
                     return Err(invalid("a colormap exceeds 256 colors"));
                 }
-                4 + colors * components
+                let canonical = 4 + colors * components;
+                if version != 0 && declared != canonical && declared != 4 + colors {
+                    return Err(invalid("indexed colormap length does not match its color count"));
+                }
+                canonical
             } else if version != 0 && (1..=256).contains(&colors) && declared == colors + 4 {
                 let repaired = 4 + colors * components;
                 if repair_palette_boundary(input, declared - 4, repaired - 4, version, ctl)? {
@@ -411,12 +422,12 @@ fn link_length(input: &mut impl PropertyInput, declared: usize, version: Option<
         {
             return Ok(repaired);
         }
-        let left = property_continuation(input, declared, version.unwrap_or(25), false, ctl)?;
+        let left = property_continuation(input, declared, version.unwrap_or(25), version.is_some(), ctl)?;
         return Ok(if left.end.is_some_and(|end| input.link_drawable_framed(end)) { declared } else { repaired });
     }
-    let left = property_continuation(input, declared, version.unwrap_or(25), false, ctl)?;
+    let left = property_continuation(input, declared, version.unwrap_or(25), version.is_some(), ctl)?;
     let left_framed = left.end.is_some_and(|end| input.link_drawable_framed(end));
-    let right = property_continuation(input, repaired, version.unwrap_or(25), false, ctl)?;
+    let right = property_continuation(input, repaired, version.unwrap_or(25), version.is_some(), ctl)?;
     let right_framed = right.end.is_some_and(|end| input.link_drawable_framed(end));
     let extend =
         if left_framed != right_framed { right_framed } else { right.end.is_some() && (left.end.is_none() || right.unusual_lengths < left.unusual_lengths) };
@@ -465,7 +476,7 @@ fn property_continuation(
     input: &mut impl PropertyInput,
     mut offset: usize,
     version: u32,
-    palettes: bool,
+    image_properties: bool,
     ctl: &photocraft_raster::Interrupt<'_>,
 ) -> Result<PropertyContinuation> {
     let limit = input.palette_lookahead_limit();
@@ -489,7 +500,7 @@ fn property_continuation(
             continuation.unusual_lengths += usize::from(length != 0);
             break;
         }
-        if kind == 24 {
+        if kind == 24 && image_properties {
             // The size word does not delimit historical custom units.
             let mut next = offset.saturating_add(16);
             for _ in 0..custom_unit_strings(version) {
@@ -510,12 +521,11 @@ fn property_continuation(
             offset = next;
             continue;
         }
-        // These records have their own historical length rules. A probe that
-        // cannot establish their framing gives no evidence against this boundary.
-        if kind == 48 || (kind == 1 && !palettes) {
+        // An adjacent link can have its own ambiguous historical length.
+        if kind == 48 {
             break;
         }
-        let length = if kind == 1 {
+        let length = if kind == 1 && image_properties {
             let Some(length) = following_palette_length(input, offset + 8, length, version, limit)? else { break };
             length
         } else {

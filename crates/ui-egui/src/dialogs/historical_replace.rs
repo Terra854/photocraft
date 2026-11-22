@@ -130,7 +130,7 @@ pub(crate) fn prompt_edit(
 ) -> Result<Value, String> {
     let state = app.session.active().ok_or("no document")?;
     let target = target_in(state, layer)?;
-    let id = hold(app, Action::Edit(target), false, source_name, None, Some(question), None)?;
+    let id = hold(app, Action::Edit(target), app.automation_input, source_name, None, Some(question), None)?;
     crate::open_prompt::advance(app);
     Ok(json!({"heldHistoricalXcfEdit": id}))
 }
@@ -348,12 +348,17 @@ fn apply_source(
     automated: bool,
 ) -> Result<Value, String> {
     action.check(app)?;
-    if let Action::Edit(target) = action {
-        app.refocus(target.doc)?;
-        return app.run(action.command(), json!({"layer":target.layer.0,"historicalXcfSampleOrder":order}));
-    }
-    if let Action::Replace(target) = action {
-        app.check_automation_command(automated || app.automation_input, action.command(), &json!({"layer":target.layer.0,"historicalXcfSampleOrder":order}))?;
+    if let Action::Edit(target) | Action::Replace(target) = action {
+        let params = json!({"layer":target.layer.0,"historicalXcfSampleOrder":order});
+        app.check_automation_command(automated || app.automation_input, action.command(), &params)?;
+        if matches!(action, Action::Edit(_)) {
+            app.refocus(target.doc)?;
+            let previous = app.automation_input;
+            app.automation_input |= automated;
+            let result = app.run(action.command(), params);
+            app.automation_input = previous;
+            return result;
+        }
     }
     let bytes = owned_bytes(bytes.ok_or("the picked Smart Object source is gone")?);
     if let Action::Place { doc, linked, .. } = action {

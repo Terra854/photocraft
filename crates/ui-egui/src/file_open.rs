@@ -21,7 +21,11 @@ pub(crate) fn apply_initial_path(app: &mut PhotocraftApp) {
     }
     let selected = app.session.active_mut().and_then(|st| {
         let index = st.initial_path_selection.take()?;
-        let path = st.doc.paths.get(index)?;
+        let identity = st.initial_path_identity.take();
+        let path = st.doc.paths.get(index);
+        let Some(path) = path.filter(|path| identity.is_none_or(|expected| photocraft_io::path_identity(path) == expected)) else {
+            return Some((st.doc.name.clone(), None, Some("the selected path is no longer available")));
+        };
         let reason = if photocraft_engine::vector_cmds::is_reserved_path_name(&path.name) {
             Some("the saved path name is reserved by the Paths UI")
         } else if st.doc.paths.iter().filter(|other| other.name == path.name).take(2).count() != 1 {

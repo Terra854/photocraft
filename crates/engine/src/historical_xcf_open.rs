@@ -133,18 +133,22 @@ impl Session {
                 let command = input.command();
                 let spawn = background || self.cooperative_jobs();
                 let place = move |s: &mut Session| crate::file_cmds::place_input(s, input);
-                if params.get("path").and_then(Value::as_str).is_some() {
+                let resumed = if params.get("path").and_then(Value::as_str).is_some() {
                     if let Some(fields) = params.as_object_mut() {
                         fields.remove("askHistoricalXcfSampleOrder");
                         fields.remove("verifyHistoricalXcfLink");
                     }
-                    self.dispatch_retained_source(command, params, spawn, place)?
+                    self.dispatch_retained_source(command, params, spawn, place)
                 } else {
                     if let Some(conflict) = self.job_conflict(command, true) {
                         return Err(EngineError::Other(conflict));
                     }
-                    self.start_registered(command, params, spawn, place)?
+                    self.start_registered(command, params, spawn, place)
+                };
+                if matches!(resumed, Err(EngineError::HistoricalXcfLinkChanged(_))) {
+                    self.cancel_historical_xcf_open(id);
                 }
+                resumed?
             }
         };
         self.jobs.historical_xcf.retain(|held| held.id != id);

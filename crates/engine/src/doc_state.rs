@@ -50,6 +50,9 @@ pub struct DocState {
     pub color_samplers: Vec<[f64; 2]>,
     /// One-time Paths panel selection from an import; a host consumes it without editing the document.
     pub initial_path_selection: Option<usize>,
+    /// Source path fingerprint used when the host takes the selection.
+    pub initial_path_identity: Option<[u8; 32]>,
+    pub(crate) import_initial_view_applied: bool,
     /// History panel snapshots, oldest first (`history.newSnapshot`, #2966): the first (id 0) is
     /// the document as opened (unless History Options › Automatically Create First Snapshot is
     /// off). Kept for the session only, as in Photoshop: not history states,
@@ -153,6 +156,8 @@ impl DocState {
             floating: None,
             color_samplers: Vec::new(),
             initial_path_selection: None,
+            initial_path_identity: None,
+            import_initial_view_applied: false,
             snapshots: vec![first],
             snapshots_generation: next_snapshots_generation(),
             next_snapshot: 1,

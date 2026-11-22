@@ -8,6 +8,19 @@ license = "MIT OR Apache-2.0"
 # Separate cargo-fuzz workspace, following the other format crates.
 [workspace]
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+
+[lints]
+workspace = true
+
 [package.metadata]
 cargo-fuzz = true
 
@@ -25,10 +38,10 @@ bench = false
 # A separate fuzz workspace does not inherit the host workspace patches.
 # craft-pdf requires the same reviewed Hayro API as the application.
 [patch.crates-io]
-hayro = { git = "https://github.com/storytold/craft-libs", rev = "77c7c62345c1f4213f59a07d9fdc156ecde0b540" }
-hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "77c7c62345c1f4213f59a07d9fdc156ecde0b540" }
-hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "77c7c62345c1f4213f59a07d9fdc156ecde0b540" }
-hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "77c7c62345c1f4213f59a07d9fdc156ecde0b540" }
+hayro = { git = "https://github.com/storytold/craft-libs", rev = "e953d47a378776dea207899b10baf969fc8cbe53" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "e953d47a378776dea207899b10baf969fc8cbe53" }
+hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "e953d47a378776dea207899b10baf969fc8cbe53" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "e953d47a378776dea207899b10baf969fc8cbe53" }
 # Hayro calls the workspace-patched Vello CPU coverage API.
-vello_common = { git = "https://github.com/storytold/craft-libs", rev = "77c7c62345c1f4213f59a07d9fdc156ecde0b540" }
-vello_cpu = { git = "https://github.com/storytold/craft-libs", rev = "77c7c62345c1f4213f59a07d9fdc156ecde0b540" }
+vello_common = { git = "https://github.com/storytold/craft-libs", rev = "e953d47a378776dea207899b10baf969fc8cbe53" }
+vello_cpu = { git = "https://github.com/storytold/craft-libs", rev = "e953d47a378776dea207899b10baf969fc8cbe53" }

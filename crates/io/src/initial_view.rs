@@ -25,6 +25,8 @@ pub struct NativeInitialView {
     pub active_layer: Option<LayerId>,
     pub target: NativeImportTarget,
     pub selected_path: Option<usize>,
+    /// Fingerprint of the named source path before admission can mutate the document.
+    pub selected_path_identity: Option<[u8; 32]>,
     /// Native alpha-channel overlay eyes, independent of the channel editing target.
     pub visible_alpha_channels: Vec<usize>,
     /// Show the active layer mask through the native mask view, without changing content.
@@ -33,7 +35,33 @@ pub struct NativeInitialView {
     pub samplers: Vec<[f64; 2]>,
 }
 
+/// Follow the geometry and name through admission using bounded working storage.
+pub fn path_identity(path: &photocraft_doc::vector::NamedPath) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(&(path.name.len() as u64).to_le_bytes());
+    hash.update(path.name.as_bytes());
+    hash.update(&[path.path.fill_rule as u8, u8::from(path.path.inverted)]);
+    hash.update(&(path.path.subpaths.len() as u64).to_le_bytes());
+    for subpath in &path.path.subpaths {
+        hash.update(&[u8::from(subpath.closed), subpath.op as u8]);
+        hash.update(&(subpath.knots.len() as u64).to_le_bytes());
+        for knot in &subpath.knots {
+            hash.update(&[u8::from(knot.smooth)]);
+            for point in [knot.anchor, knot.in_ctrl, knot.out_ctrl] {
+                hash.update(&point.x.to_le_bytes());
+                hash.update(&point.y.to_le_bytes());
+            }
+        }
+    }
+    *hash.finalize().as_bytes()
+}
+
 impl NativeInitialView {
+    /// Drop an identity-bound selection when the admission or UI state no longer matches it.
+    pub fn matches_selected_path(&self, doc: &Document) -> bool {
+        self.selected_path_identity.is_none_or(|identity| self.selected_path.and_then(|index| doc.paths.get(index)).map(path_identity) == Some(identity))
+    }
+
     /// Validate against the pending native document before changing any host view state.
     pub fn validate(&self, doc: &Document) -> Result<(), IoError> {
         let invalid = |message: &str| IoError::Unsupported(format!("invalid native initial view: {message}"));

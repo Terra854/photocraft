@@ -12,7 +12,7 @@ use craft::draw::ui::transform::TransformEdit;
 use egui::vec2;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use photocraft_engine::jobs::{JobId, Started};
+use photocraft_engine::jobs::{JobId, JobOutcome, Started};
 use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
@@ -1215,6 +1215,7 @@ fn native_view_fixture() -> (photocraft_doc::Document, photocraft_io::NativeInit
         selected_layers: selected,
         target: photocraft_io::NativeImportTarget::LayerMask,
         selected_path: Some(1),
+        selected_path_identity: Some(photocraft_io::path_identity(&doc.paths[1])),
         visible_alpha_channels: vec![0],
         show_layer_mask: true,
         samplers: vec![[1., 2.], [6., 4.]],
@@ -1371,7 +1372,7 @@ fn completed_background_open_keeps_native_view_when_queued_behind_profile_prompt
         &mut app,
         "background.xcf",
         None,
-        &json!({"document":index,"docId":document.0,"warnings":[],"hasInitialView":true,"initialPathSelection":view.selected_path}),
+        &json!({"document":index,"docId":document.0,"warnings":[],"hasInitialView":true,"initialPathSelection":view.selected_path,"initialPathIdentity":view.selected_path_identity}),
         None,
         None,
     )
@@ -1597,4 +1598,57 @@ fn asynchronous_place_completion_displays_result_warnings() {
     // A frame placement bypasses transform startup but must still display its warnings.
     super::finish_place(&mut app, &egui::Context::default(), place, photocraft_engine::jobs::JobOutcome::Done(json!({"frame":1,"warnings":[warning]})));
     assert!(app.ui.notices.iter().any(|notice| notice.lines.iter().any(|line| line == warning)));
+}
+
+#[test]
+fn queued_open_waits_for_a_completed_placement_transform_to_commit_or_cancel() {
+    for commit in [false, true] {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.background_jobs = false;
+        let ctx = egui::Context::default();
+        app.session.execute("file.new", json!({"width":16,"height":16})).unwrap();
+        let doc = app.session.active().unwrap().doc.id;
+        let original_layers = app.session.active().unwrap().doc.layers.len();
+        app.sync_views();
+        let source = br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff0011"/></svg>"##;
+        let result = app.place_bytes("placed.svg", source.to_vec(), None, None).unwrap();
+        let placed = photocraft_doc::LayerId(result["layer"].as_u64().unwrap());
+        assert!(app.session.active().unwrap().doc.layer(placed).is_some());
+        let mut next = app.session.active().unwrap().doc.as_ref().clone();
+        next.id = photocraft_doc::DocId::fresh();
+        next.name = "Queued Open".into();
+        let next_doc = next.id;
+        app.jobs.place = Some(super::PlaceJob { job: JobId(42), name: "placed.svg".into(), doc });
+        crate::open_prompt::arrive(
+            &mut app,
+            crate::open_prompt::Held {
+                doc: next,
+                read_only: false,
+                initial_view: None,
+                damage_pending: false,
+                name: "Queued Open".into(),
+                path: None,
+                warnings: Vec::new(),
+                bytes: None,
+                slot: None,
+                order: None,
+                question: None,
+                policy_applied: true,
+                smart_object: false,
+            },
+        );
+        let job = app.jobs.place.take().unwrap();
+        super::finish_place(&mut app, &ctx, job, JobOutcome::Done(result));
+        assert!(app.ui.transform.as_ref().is_some_and(|transform| transform.made == Some(crate::state::MadeLayer::Place)));
+        assert_eq!(app.session.active().unwrap().doc.id, doc);
+        if commit {
+            crate::transform_tool::commit(&mut app);
+        } else {
+            crate::transform_tool::cancel(&mut app);
+        }
+        crate::open_prompt::take(&mut app, &ctx);
+        assert_eq!(app.session.active().unwrap().doc.id, next_doc);
+        let placed_doc = app.session.documents().iter().find(|state| state.doc.id == doc).unwrap();
+        assert_eq!(placed_doc.doc.layers.len(), original_layers + usize::from(commit));
+    }
 }

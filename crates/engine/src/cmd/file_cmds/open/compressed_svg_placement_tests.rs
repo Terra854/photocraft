@@ -27,7 +27,10 @@ fn compressed_byte_candidates_defer_to_the_importer_without_probing_during_place
     let session = session(32);
     for bytes in [vec![0x1f, 0x8b], b"BZh".to_vec(), b"\xfd7zXZ\0".to_vec()] {
         assert!(!photocraft_io::is_svg_input("", &bytes), "the malformed source is not positively identified as SVG");
-        let input = PlaceInput::new(&session, "", bytes, None, &json!({})).unwrap();
+        let input = PlaceInput::with_file_classified(&session, "", PlaceFile::Bytes(Arc::new(bytes)), None, &json!({}), |_| {
+            panic!("setup must not invoke the SVG probe on a compressed source");
+        })
+        .unwrap();
         assert!(input.doc.is_none(), "compressed inputs use ordinary import and raster placement");
     }
     let input = PlaceInput::new(&session, "raster.png", b"\x89PNG\r\n\x1a\n".to_vec(), None, &json!({})).unwrap();

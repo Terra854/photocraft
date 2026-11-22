@@ -405,6 +405,9 @@ fn append_output(output: &mut Vec<u8>, bytes: &[u8], limit: usize, oversized: im
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! { static SVG_PROBE_OUTPUT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// Unknown gzip bodies need only a bounded signature before filename fallback.
 /// A claimed SVG keeps this decoder, including its existing member/tail policy.
 fn probe_svg(decoder: &mut dyn Read, output: &mut Vec<u8>, ctl: &Interrupt<'_>, limit: usize) -> Result<bool> {
@@ -424,6 +427,8 @@ fn probe_svg(decoder: &mut dyn Read, output: &mut Vec<u8>, ctl: &Interrupt<'_>, 
         if count == 0 {
             break;
         }
+        #[cfg(test)]
+        SVG_PROBE_OUTPUT.with(|decoded| decoded.set(decoded.get().saturating_add(count)));
         let bytes = chunk.get(..count).ok_or_else(|| invalid("invalid SVG probe length"))?;
         append_output(output, bytes, limit, || IoError::Svg(format!("compressed SVG inflates past {limit} bytes")))?;
     }

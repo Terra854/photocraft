@@ -514,8 +514,27 @@ fn close_after_saves(app: &mut PhotocraftApp, ctx: &egui::Context) {
 /// Per frame: apply finished jobs and react to them; keep frames coming while jobs run; Esc
 /// cancels the job in view.
 pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
-    for e in app.session.poll_jobs() {
-        on_event(app, ctx, e);
+    let focused_before_poll = app.session.active().map(|state| state.doc.id);
+    let mut place = None;
+    let mut admitted_open = false;
+    for event in app.session.poll_jobs() {
+        // The engine can admit another Open in this poll before the shell sees
+        // Place complete. Move that Open to the held queue while Place still owns focus.
+        if app.jobs.place.as_ref().is_some_and(|job| job.job == event.id) {
+            place = Some(event);
+        } else {
+            admitted_open |= event.command == OPEN_JOB && matches!(&event.outcome, JobOutcome::Done(result) if result["docId"].is_u64());
+            on_event(app, ctx, event);
+        }
+    }
+    if let Some(event) = place {
+        if admitted_open
+            && app.jobs.place.as_ref().is_some_and(|place| Some(place.doc) == focused_before_poll)
+            && let Some(index) = app.session.documents().iter().position(|state| Some(state.doc.id) == focused_before_poll)
+        {
+            app.session.set_active(index);
+        }
+        on_event(app, ctx, event);
     }
     // A focused open tab that ended (or was cancelled elsewhere) gives way to the documents.
     if app.jobs.focus.is_some_and(|j| !app.jobs.opens.iter().any(|o| o.job == j)) {
@@ -819,6 +838,7 @@ pub(crate) fn finish_open_with_held(
     let document = v.get("docId").and_then(Value::as_u64).map(DocId).ok_or("the open job returned no document identity")?;
     let index = app.session.documents().iter().position(|st| st.doc.id == document).ok_or("the open job's document is missing")?;
     let path_hint = v.get("initialPathSelection").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+    let path_identity = v.get("initialPathIdentity").and_then(|value| serde_json::from_value::<[u8; 32]>(value.clone()).ok());
     // An earlier file is waiting on its prompt: this document waits after it, in order.
     if crate::open_prompt::waiting(app)
         && let Some(st) = app.session.close(index)
@@ -836,6 +856,7 @@ pub(crate) fn finish_open_with_held(
             // A preceding job event may already have synchronized the active UI and consumed
             // its one-time path hint. The open result retains the exact index, even for duplicate names.
             selected_path: st.initial_path_selection.or(path_hint),
+            selected_path_identity: st.initial_path_identity.or(path_identity),
             visible_alpha_channels: st.channel_view.alpha_visible.iter().enumerate().filter_map(|(i, visible)| visible.then_some(i)).collect(),
             show_layer_mask: st.channel_view.layer_mask.is_some(),
         });
@@ -854,6 +875,7 @@ pub(crate) fn finish_open_with_held(
         && let Some(st) = app.session.active_mut()
     {
         st.initial_path_selection = Some(hint);
+        st.initial_path_identity = path_identity;
     }
     if let Some(slot) = tab_slot(app, slot, order) {
         let _ = app.run("document.move", json!({"document": index, "to": slot}));

@@ -99,7 +99,7 @@ use std::sync::Arc;
 
 use craft_psd::{PsdError, PsdFile};
 pub use export_estimate::estimate_export_bytes;
-pub use initial_view::{MAX_INITIAL_SAMPLERS, NativeImportTarget, NativeInitialView};
+pub use initial_view::{MAX_INITIAL_SAMPLERS, NativeImportTarget, NativeInitialView, path_identity};
 use photocraft_codecs::{CodecError, EncodeOptions};
 pub use photocraft_codecs::{DdsCompression, DdsOptions, DpxBits};
 use photocraft_doc::{Adjustment, Document, Layer, LayerContent};

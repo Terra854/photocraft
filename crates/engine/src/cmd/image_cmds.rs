@@ -609,7 +609,7 @@ pub(crate) fn crop_doc(doc: &mut Document, cmd: &str, r: Rect, delete_pixels: bo
     if extends {
         drop_fill_caches(&mut doc.layers);
     }
-    crate::canvas_geom::refresh(doc, crate::canvas_geom::Refresh::Shapes);
+    crate::canvas_geom::refresh(doc, crate::canvas_geom::Refresh::CanvasBounds);
     Ok(())
 }
 

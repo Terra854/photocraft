@@ -309,6 +309,7 @@ pub(super) fn image_with_work<'a>(
     let mut text_storage = TextStorage::default();
     let mut metadata_incomplete = false;
     let mut retention_limited = false;
+    let effective_resolution_offset = props.iter().rfind(|p| p.kind == 19 && resolution_pair(p.data).is_some()).map(|p| p.offset);
     for p in props {
         ctl.check().map_err(|_| super::IoError::Cancelled)?;
         match p.kind {
@@ -321,7 +322,12 @@ pub(super) fn image_with_work<'a>(
                             "xcf.resolution",
                             Reason::NativeLimitation,
                             format!("Horizontal {x} DPI; vertical {y} DPI"),
-                            "Native document uses horizontal DPI for both axes; source axis values retained".into(),
+                            if Some(p.offset) == effective_resolution_offset {
+                                "Native document uses horizontal DPI for both axes; source axis values retained"
+                            } else {
+                                "Superseded by a later valid resolution; source axis values retained"
+                            }
+                            .into(),
                         )?;
                     }
                 } else {
@@ -465,9 +471,38 @@ pub(super) fn image_with_work<'a>(
             warnings,
         )?;
     }
+    image_sample_points(doc, props, view, outcomes, owner, warnings, ctl)
+}
+
+fn image_sample_points<'a>(
+    doc: &Document,
+    props: &[Prop<'a>],
+    view: &mut NativeInitialView,
+    outcomes: &mut conversion::Outcomes<'a>,
+    owner: usize,
+    warnings: &mut crate::ora::Warnings,
+    ctl: &photocraft_raster::Interrupt<'_>,
+) -> Result<()> {
+    use photocraft_doc::import_conversion::ConversionReason as Reason;
     // New records take precedence over compatibility old records regardless of property order.
     let modern = props.iter().rev().find(|p| p.kind == 39);
-    let samples = modern.or_else(|| props.iter().rev().find(|p| p.kind == 27));
+    let modern = if let Some(property) = modern.filter(|property| (1..20).contains(&property.data.len())) {
+        outcomes.notice(
+            owner,
+            "xcf.sample_points",
+            Reason::InvalidOptionalData,
+            (
+                format!("Truncated modern sample-position property ({} bytes)", property.data.len()),
+                "No complete modern records; legacy positions used when available".into(),
+            ),
+            Some("has truncated modern sample-position data; valid legacy positions were used when available"),
+            warnings,
+        )?;
+        None
+    } else {
+        modern
+    };
+    let samples = modern.or_else(|| props.iter().rfind(|p| p.kind == 27));
     if let Some(p) = samples {
         let stride = if p.kind == 39 { 20 } else { 8 };
         for record in p.data.chunks_exact(stride) {

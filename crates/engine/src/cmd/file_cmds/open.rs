@@ -467,6 +467,17 @@ impl PlaceInput {
     /// The input of a place of `file`, with the destination (canvas or frame), preferences and
     /// import settings taken from the session up front.
     fn with_file(s: &Session, name: &str, file: PlaceFile, linked: Option<String>, p: &Value) -> Result<Self> {
+        Self::with_file_classified(s, name, file, linked, p, photocraft_io::svg::is_svg)
+    }
+
+    fn with_file_classified(
+        s: &Session,
+        name: &str,
+        file: PlaceFile,
+        linked: Option<String>,
+        p: &Value,
+        plain_svg: impl FnOnce(&[u8]) -> bool,
+    ) -> Result<Self> {
         let d = s.active().ok_or(EngineError::NoDocument)?;
         let prefs = s.prefs();
         let frame_id = match p.get("frame") {
@@ -501,7 +512,9 @@ impl PlaceInput {
             // an embedded place lands as a plain pixel layer.
             smart: linked.is_some() || p.get("smartObject").and_then(Value::as_bool).unwrap_or(prefs.general.always_create_smart_objects_when_placing),
             doc: match &file {
-                PlaceFile::Bytes(bytes) => (frame.is_some() || photocraft_io::svg::is_svg(bytes)).then(|| Arc::clone(&d.doc)),
+                PlaceFile::Bytes(bytes) => {
+                    (frame.is_some() || (!crate::jobs::has_compressed_import_signature(bytes) && plain_svg(bytes))).then(|| Arc::clone(&d.doc))
+                }
                 PlaceFile::Path(_) => Some(Arc::clone(&d.doc)),
             },
             frame,

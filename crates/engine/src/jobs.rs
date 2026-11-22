@@ -1441,20 +1441,18 @@ impl Session {
                         let held = s.hold_open_with_view(r.document, r.source_read_only, r.initial_view);
                         return Ok(json!({"held": held, "name": name_a, "warnings": r.warnings, "color": question, "damaged": damaged}));
                     }
-                    let has_initial_view = r.initial_view.is_some();
                     // The shell may synchronize another completed job before handling this
                     // open, consuming the pending path. Keep its exact index for queued opens.
-                    let initial_path_selection = r.initial_view.as_ref().and_then(|view| view.selected_path);
                     let (index, color, view_warning) =
                         s.admit_import_with_initial_view(r.source_read_only, r.initial_view, |s| s.open_document(r.document, None))?;
-                    let has_initial_view = has_initial_view && view_warning.is_none();
-                    let initial_path_selection = if view_warning.is_none() { initial_path_selection } else { None };
+                    let state = s.documents().get(index).ok_or(EngineError::NoDocument)?;
+                    let (initial_path_selection, initial_path_identity) = (state.initial_path_selection, state.initial_path_identity);
+                    let (id, has_initial_view) = (state.doc.id, state.import_initial_view_applied);
                     if let Some(warning) = view_warning {
                         r.warnings.push(warning);
                     }
-                    let id = s.documents().get(index).ok_or(EngineError::NoDocument)?.doc.id;
                     Ok(json!({"document": index, "docId": id.0, "name": name_a, "warnings": r.warnings, "color": color,
-                        "hasInitialView": has_initial_view, "initialPathSelection": initial_path_selection}))
+                        "hasInitialView": has_initial_view, "initialPathSelection": initial_path_selection, "initialPathIdentity": initial_path_identity}))
                 }
             },
         )

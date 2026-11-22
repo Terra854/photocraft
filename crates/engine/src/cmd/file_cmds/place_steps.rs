@@ -316,11 +316,12 @@ impl PlaceSteps {
                 // A resumed picker holds the approved bytes while the linked path can change.
                 if input.params.get("verifyHistoricalXcfLink").and_then(Value::as_bool) == Some(true) {
                     ctx.progress(0.95, "Verifying linked source");
-                    let current = super::paths::read_file_limited(path, self.bytes.len() as u64)
-                        .map_err(|error| EngineError::Other(format!("could not verify the linked source {path}: {error}. Pick the file again")))?;
-                    ctx.check()?;
-                    if current.as_slice() != self.bytes.as_slice() {
-                        return Err(EngineError::Other("the linked source changed while choosing the sample byte order. Pick the file again".into()));
+                    let changed = EngineError::HistoricalXcfLinkChanged("the linked source changed while choosing the sample byte order. Pick the file again");
+                    match super::paths::read_file_limited(path, self.bytes.len() as u64) {
+                        Ok(current) if current.as_slice() == self.bytes.as_slice() => ctx.check()?,
+                        Ok(_) => return Err(changed),
+                        Err(error) if matches!(error.kind(), std::io::ErrorKind::FileTooLarge | std::io::ErrorKind::NotFound) => return Err(changed),
+                        Err(error) => return Err(EngineError::Other(format!("could not verify the linked source {path}: {error}"))),
                     }
                 }
                 so.historical_xcf_link_digest = Some(input.expected_source_digest.unwrap_or_else(|| photocraft_io::linked::historical_xcf_digest(&self.bytes)));

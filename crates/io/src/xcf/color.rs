@@ -79,6 +79,8 @@ pub(super) fn profile(mode: ColorMode, precision: Precision, assigned: Option<Ve
             profile.trc = Some([curve.clone(), curve.clone(), curve]);
         }
         profile.description = format!("{} ({} samples)", profile.description, if precision.linear { "linear" } else { "sRGB-curve" });
+        // The writer emits v4, where wtpt is the absolute media white.
+        profile.white_point = profile.media_white();
         profile = profile.with_encoded_bytes();
     }
     // Establish usability through the same native CMS used by document color policy. This
@@ -167,6 +169,25 @@ mod tests {
                 assert_ne!(parsed.matrix, Builtin::Srgb.profile().matrix);
             }
         }
+    }
+
+    #[test]
+    fn v2_display_absolute_media_white_survives_the_icc_v4_rewrite() {
+        let mut definition = Builtin::DisplayP3.profile().clone();
+        definition.white_point = [0.95047, 1., 1.08883];
+        let mut bytes = definition.with_encoded_bytes().to_bytes().as_ref().clone();
+        bytes[8] = 2;
+        bytes[9] = 0x40;
+        let original = Profile::parse(&bytes).unwrap();
+        assert_ne!(original.media_white(), original.white_point);
+        for code in [600, 675] {
+            let converted = profile(ColorMode::Rgb, Precision::from_header(26, code).unwrap(), Some(bytes.clone())).unwrap();
+            let parsed = Profile::parse(&converted).unwrap();
+            for (actual, expected) in parsed.media_white().into_iter().zip(original.media_white()) {
+                assert!((actual - expected).abs() < 0.00002);
+            }
+        }
+        assert_eq!(profile(ColorMode::Rgb, Precision::GAMMA8, Some(bytes.clone())).unwrap().as_ref(), &bytes);
     }
 
     #[test]

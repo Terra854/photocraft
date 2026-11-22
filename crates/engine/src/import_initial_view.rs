@@ -34,8 +34,20 @@ impl Session {
         }
         // Application validates every hint before mutating any view state, so a rejected hint
         // can be dropped as a unit without discarding successfully decoded image content.
-        let warning =
-            self.apply_import_initial_view(view).err().map(|error| format!("Native initial view was not applied; the default view was used: {error}"));
+        let mut view = view;
+        let changed_path = view.as_mut().zip(self.docs.get(index)).is_some_and(|(view, state)| {
+            if view.matches_selected_path(state.doc()) {
+                return false;
+            }
+            view.selected_path = None;
+            view.selected_path_identity = None;
+            true
+        });
+        let warning = self
+            .apply_import_initial_view(view)
+            .err()
+            .map(|error| format!("Native initial view was not applied; the default view was used: {error}"))
+            .or_else(|| changed_path.then(|| "Imported path selection was not applied because the selected path changed during admission".into()));
         self.sync_tools_mask_target();
         Ok((index, report, warning))
     }
@@ -81,6 +93,8 @@ impl Session {
             None
         };
         st.initial_path_selection = view.selected_path;
+        st.initial_path_identity = view.selected_path_identity;
+        st.import_initial_view_applied = true;
         self.note_layer_change(before);
         self.sync_tools_mask_target();
         Ok(())
@@ -281,6 +295,32 @@ mod initial_view_tests {
         assert_eq!(session.active_index(), Some(index));
         assert!(session.active().unwrap().initial_path_selection.is_none());
         assert!(Arc::ptr_eq(&session.documents()[0].doc, &original));
+    }
+
+    #[test]
+    fn changed_selected_path_is_omitted_while_other_view_hints_survive() {
+        let mut session = Session::new();
+        let mut imported =
+            photocraft_doc::Document::new("Paths", photocraft_geom::Size::new(8, 8), photocraft_color::ColorMode::Rgb, photocraft_color::SampleType::U8);
+        for name in ["A", "B", "C"] {
+            imported.paths.push(photocraft_doc::vector::NamedPath { name: name.into(), ..Default::default() });
+        }
+        let view = NativeInitialView {
+            selected_path: Some(1),
+            selected_path_identity: Some(photocraft_io::path_identity(&imported.paths[1])),
+            samplers: vec![[1., 1.]],
+            ..Default::default()
+        };
+        let (_, _, warning) = session
+            .admit_import_with_initial_view(false, Some(view), |s| {
+                imported.paths.remove(0);
+                s.open_document(imported, None)
+            })
+            .unwrap();
+        assert!(warning.unwrap().contains("changed during admission"));
+        let state = session.active().unwrap();
+        assert_eq!(state.initial_path_selection, None);
+        assert_eq!(state.color_samplers, vec![[1., 1.]]);
     }
 
     #[test]

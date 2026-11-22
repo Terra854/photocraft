@@ -52,14 +52,16 @@ fn stack_image_classified(
         all => all,
     };
     let bounds = doc.bounds();
-    // An SVG opens with one layer per shape, and every visible one gets its own float frame:
-    // they may take 1 GiB together, the SVG import's own budget, before any is rendered.
-    if svg {
-        let visible = u64::try_from(layers.iter().filter(|l| l.visible).count()).unwrap_or(u64::MAX);
-        let frame_bytes = doc.size.area().saturating_mul(16);
-        if visible.saturating_mul(frame_bytes) > 1 << 30 {
-            return Err(EngineError::Other("the SVG has too many shapes for Stack Mode at this size".into()));
-        }
+    let visible = layers.iter().filter(|layer| layer.visible).count() as u64;
+    if visible == 0 {
+        return Err(EngineError::Other("the smart object's contents have no visible layers".into()));
+    }
+    // Float RGBA frames remain live through the combined output and its native conversion.
+    let frame_bytes = doc.size.area().saturating_mul(16);
+    if visible.saturating_add(2).saturating_mul(frame_bytes) > 1 << 30 {
+        let message =
+            if svg { "the SVG has too many shapes for Stack Mode at this size" } else { "the smart object's layers exceed the 1 GiB Stack Mode frame limit" };
+        return Err(EngineError::Other(message.into()));
     }
     let frames: Vec<Vec<[f32; 4]>> = layers
         .iter()
@@ -71,9 +73,6 @@ fn stack_image_classified(
             photocraft_compose::render_layer(&one, bounds).into_px()
         })
         .collect();
-    if frames.is_empty() {
-        return Err(EngineError::Other("the smart object's contents have no visible layers".into()));
-    }
     let stat = match mode {
         photocraft_doc::StackMode::Entropy => Stat::Entropy,
         photocraft_doc::StackMode::Kurtosis => Stat::Kurtosis,

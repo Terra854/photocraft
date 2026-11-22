@@ -63,7 +63,7 @@ pub(crate) struct Preparing {
     layer: (DocId, LayerId),
     /// The layer was made for this box (⌥⌘T's copy, a placed file): the opened session gets the
     /// marker, and a box that never opens takes the layer back, as Esc would.
-    made: Option<MadeLayer>,
+    pub(crate) made: Option<MadeLayer>,
 }
 
 /// The canvas key of an open box's preview document (`display_doc`).

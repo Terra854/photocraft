@@ -14,7 +14,9 @@ Select **Little-endian** or **Big-endian** when desktop Open, Replace Contents, 
 to File asks. Edit Contents also asks when an older bundle embeds such a source without a saved
 choice. The chosen order is stored with the Smart Object. Relink keeps the previous choice when
 the source bytes match. Recorded Place Linked actions verify that the file still matches the
-bytes associated with the chosen order.
+bytes associated with the chosen order. Replace Contents is recordable when invoked with a file
+path. A picker replacement that supplies only retained bytes has no replayable path and is
+omitted from the Action.
 
 For CLI Convert, Info, Run, Batch, and Droplet, pass `--historical-xcf-sample-order little-endian` or
 `--historical-xcf-sample-order big-endian`. Use `historical_xcf_sample_order` for MCP `doc_open`
@@ -57,7 +59,7 @@ Text layers in documents with unequal horizontal and vertical DPI keep their sav
 Vector layers with an enabled pattern also keep their saved pixels, with the source path
 available separately for editing. Active paint that cannot be decoded, including writer-endian
 float colours without byte-order evidence, also preserves the saved appearance. Canvas Size
-keeps imported shape pixels when adding or removing canvas area. PSDs saved by PhotoCraft
+and straight Crop keep imported shape pixels when changing the canvas bounds. PSDs saved by PhotoCraft
 carry a private layer tag so PhotoCraft can restore the saved shape and text appearance on reopen.
 
 Saved paths, guides and supported editing-view selections are imported. Floating pixels remain separate raster layers. Unsupported layer effects and optional records are disclosed in the conversion report. Retention limits omit optional data while preserving usable pixels; structural and pixel allocation limits still reject unsafe inputs.

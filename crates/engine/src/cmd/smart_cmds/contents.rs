@@ -172,6 +172,7 @@ fn report_source_change(s: &mut Session, id: LayerId, change: ChangedInstances) 
 
 /// Finish a picker-confirmed source change on a native worker. Publish the refreshed
 /// document and invalidate old Edit Contents children only after successful rendering.
+/// The retained picker bytes have no replayable path, so this job is not journaled.
 pub fn start_picked_replacement(s: &mut Session, id: LayerId, name: String, bytes: Vec<u8>, order: Option<HistoricalXcfSampleOrder>) -> Result<Started> {
     let command = "layer.smartObjects.replaceContents";
     if let Some(conflict) = s.job_conflict(command, true) {

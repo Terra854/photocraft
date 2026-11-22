@@ -442,3 +442,44 @@ fn batch_edits_the_saved_xcf_layer_with_or_without_open_suppression() {
         }
     }
 }
+
+#[test]
+fn linked_historical_choice_is_discarded_when_the_file_changes_inline() {
+    use crate::jobs::Started;
+    use photocraft_io::HistoricalXcfSampleOrder::LittleEndian;
+
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("changed.xcf");
+    for append_bytes in [false, true] {
+        std::fs::write(&path, fixture::historical_pixel(true)).unwrap();
+        let mut s = session();
+        let started = s.dispatch("file.placeLinked", json!({"path":path,"askHistoricalXcfSampleOrder":true}), false).unwrap();
+        let Started::Done(request) = started else { panic!("expected inline placement") };
+        let held = request["heldHistoricalXcfPlace"].as_u64().unwrap();
+        let mut replacement = fixture::historical_pixel(false);
+        if append_bytes {
+            replacement.push(0);
+        }
+        std::fs::write(&path, replacement).unwrap();
+        assert!(matches!(s.resume_historical_xcf_open(held, LittleEndian, false), Err(EngineError::HistoricalXcfLinkChanged(_))));
+        assert!(!s.holds_historical_xcf_open(held));
+        assert!(active_smart(&s).is_none());
+    }
+}
+
+#[test]
+fn successful_byte_only_replace_does_not_record_an_unreplayable_action() {
+    let mut s = session();
+    crate::file_cmds::place_bytes(&mut s, "initial.xcf", fixture::modern_pixel(0x1234), None, &json!({})).unwrap();
+    let layer = s.active().unwrap().active_layer.unwrap();
+    s.actions.list.push(crate::actions_cmds::Action::new("Replace source", vec![])).unwrap();
+    s.execute("actions.record", json!({"action":"Replace source"})).unwrap();
+    let started = crate::smart_cmds::start_picked_replacement(&mut s, layer, "picked.xcf".into(), fixture::modern_pixel(0x4321), None).unwrap();
+    if let crate::jobs::Started::Job(job) = started {
+        s.wait_job(job).unwrap();
+    }
+    s.execute("actions.stop", json!({})).unwrap();
+    assert!(s.actions.list.actions()[0].steps.is_empty());
+    assert!(s.journal.iter().all(|(command, _)| command != "layer.smartObjects.replaceContents"));
+    assert!((active_smart(&s).unwrap().cache.as_ref().unwrap().pixel(0, 0)[0] - f32::from(0x4321_u16) / 65535.).abs() <= 1. / 65535.);
+}

@@ -1979,3 +1979,121 @@ fn a_missing_hierarchy_is_only_allowed_for_groups_and_links() {
         }
     }
 }
+
+#[test]
+fn path_only_palette_uses_the_standalone_table_after_the_full_boundary() {
+    for repaired in [false, true] {
+        let mut w = W::new(26);
+        for value in [1, 1, 0, 150] {
+            w.u32(value);
+        }
+        w.u32(1);
+        w.u32(5);
+        w.u32(1);
+        w.out.push(255);
+        if repaired {
+            w.out.extend([0, 0]);
+        }
+        w.end();
+        w.ptr(0);
+        w.ptr(0);
+        let path = w.slot();
+        w.ptr(0);
+        let start = w.out.len();
+        w.patch(path, start);
+        w.string("Standalone");
+        let mut geometry = W { out: Vec::new(), wide: true };
+        geometry.end();
+        geometry.u32(1);
+        geometry.u32(0);
+        w.u32(geometry.out.len() as u32);
+        w.out.extend(geometry.out);
+        let result = open(&w.out).unwrap();
+        assert_eq!(result.document.paths[0].name, "Standalone");
+    }
+}
+
+#[test]
+fn tile_ranges_must_increase_even_when_both_tiles_have_enough_bytes() {
+    let mut w = W { out: vec![0; 8], wide: true };
+    let at = hierarchy(&mut w, 128, 64, 4, &vec![255; 128 * 64 * 4], Compression::None);
+    let mut image = decoder_image(&w.out);
+    image.c.wide = true;
+    assert!(image.decode_hierarchy(at, 4, false, false, None, &Interrupt::NONE).is_ok());
+    let list = at + 12 + 16 + 8;
+    let first = w.out[list..list + 8].to_vec();
+    let second = w.out[list + 8..list + 16].to_vec();
+    w.out[list..list + 8].copy_from_slice(&second);
+    w.out[list + 8..list + 16].copy_from_slice(&first);
+    let mut image = decoder_image(&w.out);
+    image.c.wide = true;
+    let error = image.decode_hierarchy(at, 4, false, false, None, &Interrupt::NONE).err().unwrap();
+    assert!(error.to_string().contains("tile offsets must increase"));
+}
+
+#[test]
+fn short_link_before_drawable_property_24_keeps_height_and_pixels() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    let mut payload = W { out: Vec::new(), wide: true };
+    payload.u32(0);
+    payload.string("short-link");
+    payload.u32(17);
+    payload.u32(1);
+    let mut image = TestImage::rgb8(1, 1);
+    image.version = 26;
+    let mut layer = TestLayer::rgba("Linked", 1, 1, vec![51, 102, 153, 255]);
+    layer.props.extend([(48, payload.out), (24, vec![])]);
+    image.layers.push(layer);
+    let mut bytes = image.write();
+    let at = bytes.windows(18).position(|bytes| bytes == b"\x00\x00\x000\x00\x00\x00\x1b\x00\x00\x00\x00\x00\x00\x00\x0bsh").unwrap();
+    bytes[at + 7] -= 4;
+    let result = open(&bytes).unwrap();
+    assert_eq!(pixel(&result.document.layers[0], 0, 0), [0.2, 0.4, 0.6, 1.0]);
+    let Some(ImportConversion::Report(report)) = result.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.link_layer" && entry.reason != ConversionReason::InvalidOptionalData));
+}
+
+#[test]
+fn final_tattoos_identify_channels_and_masks_in_the_conversion_report() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    let mut w = W::new(11);
+    for value in [1, 1, 0, 150] {
+        w.u32(value);
+    }
+    w.end();
+    let layer_slot = w.slot();
+    w.ptr(0);
+    let channel_slot = w.slot();
+    w.ptr(0);
+    let layer = w.out.len();
+    w.patch(layer_slot, layer);
+    for value in [1, 1, 1] {
+        w.u32(value);
+    }
+    w.string("Layer");
+    w.prop(11, &1_u32.to_be_bytes());
+    w.end();
+    let pixels = w.slot();
+    let mask_slot = w.slot();
+    let rgba = hierarchy(&mut w, 1, 1, 4, &[17, 31, 57, 255], Compression::None);
+    w.patch(pixels, rgba);
+    for (slot, name, last) in [(mask_slot, "Mask", 29_u32), (channel_slot, "Channel", 41_u32)] {
+        let at = w.out.len();
+        w.patch(slot, at);
+        w.u32(1);
+        w.u32(1);
+        w.string(name);
+        w.prop(20, &17_u32.to_be_bytes());
+        w.prop(20, &last.to_be_bytes());
+        w.end();
+        let data = w.slot();
+        let coverage = hierarchy(&mut w, 1, 1, 1, &[64], Compression::None);
+        w.patch(data, coverage);
+    }
+    let imported = open(&w.out).unwrap();
+    let Some(ImportConversion::Report(report)) = imported.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    for (feature, tattoo) in [("xcf.layer_mask", 29), ("xcf.channel", 41)] {
+        let owner = report.entries.iter().find(|entry| entry.feature_code == feature).unwrap();
+        assert_eq!(owner.source.tattoo, Some(tattoo));
+    }
+}
