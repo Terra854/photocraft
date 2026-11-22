@@ -1861,6 +1861,38 @@ fn consecutive_link_properties_preserve_alignment_and_use_the_last_record() {
 }
 
 #[test]
+fn a_complete_second_link_is_not_read_as_a_transform() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    let mut first = W { out: Vec::new(), wide: true };
+    first.u32(0);
+    first.string("a");
+    first.u32(13);
+    first.u32(49);
+    let first_header = [48u32.to_be_bytes().as_slice(), &18u32.to_be_bytes(), &first.out].concat();
+    let mut second = W { out: Vec::new(), wide: true };
+    second.u32(0);
+    second.string(&"a".repeat(27));
+    second.u32(23);
+    second.u32(29);
+
+    let mut image = TestImage::rgb8(1, 1);
+    image.version = 26;
+    let mut layer = TestLayer::rgba("Linked", 1, 1, vec![51, 102, 153, 255]);
+    layer.props.extend([(48, first.out), (48, second.out)]);
+    image.layers.push(layer);
+    let mut bytes = image.write();
+    let start = bytes.windows(first_header.len()).position(|record| record == first_header).unwrap();
+    bytes[start + 4..start + 8].copy_from_slice(&14u32.to_be_bytes());
+
+    let imported = open(&bytes).unwrap();
+    assert_eq!(pixel(&imported.document.layers[0], 0, 0), [0.2, 0.4, 0.6, 1.0]);
+    let Some(ImportConversion::Report(report)) = imported.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    let link = report.entries.iter().find(|entry| entry.feature_code == "xcf.link_layer").unwrap();
+    assert!(link.source_description.contains("23x29"), "{}", link.source_description);
+    assert!(report.entries.iter().all(|entry| entry.feature_code != "xcf.link_transform"));
+}
+
+#[test]
 fn a_link_missing_height_keeps_the_real_property_end_and_saved_pixels() {
     use photocraft_doc::import_conversion::ImportConversion;
     let mut payload = W { out: Vec::new(), wide: true };

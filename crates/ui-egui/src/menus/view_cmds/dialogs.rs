@@ -732,7 +732,8 @@ pub(super) fn front(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option
                 Ok(target) => target,
                 Err(error) => return Some(Err(error)),
             };
-            Some(app.pick_file_bytes(move |app, path, bytes| crate::dialogs::historical_replace::pick_relink(app, target, path, bytes)))
+            let automated = app.automation_input;
+            Some(app.pick_file_bytes(move |app, path, bytes| crate::dialogs::historical_replace::pick_relink(app, target, path, bytes, automated)))
         }
         "layer.smartObjects.convertToLinked" => {
             let st = app.session.active()?;

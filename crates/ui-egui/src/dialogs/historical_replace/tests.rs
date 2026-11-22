@@ -797,6 +797,51 @@ fn deferred_replacement_keeps_the_picker_automation_policy() {
 }
 
 #[test]
+fn relink_keeps_the_picker_automation_policy_for_plain_and_probed_sources() {
+    let folder = tempfile::tempdir().unwrap();
+    let command = "layer.smartObjects.relinkToFile";
+    for wrapped in [false, true] {
+        let Picked::Contents(mut entries) = modern_pick(wrapped) else { panic!("fixture source bytes") };
+        let (name, bytes) = entries.pop().unwrap();
+        let path = folder.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        for automated in [false, true] {
+            let mut app = app(vec![Some(Picked::Paths(vec![path.clone()]))], HistoricalXcfSampleOrder::BigEndian);
+            app.session.set_cooperative_jobs(true);
+            let before = app.session.active().unwrap().doc.clone();
+            let expected_layer = app.session.active().unwrap().active_layer.unwrap();
+            app.services.automation_command = Some(Box::new(move |id, params| {
+                assert_eq!(id, command);
+                if params["path"].is_null() {
+                    return Ok(());
+                }
+                assert_eq!(params["layer"], expected_layer.0);
+                Err("relink denied by automation policy".into())
+            }));
+            app.automation_input = automated;
+            crate::menus::invoke(&mut app, &egui::Context::default(), command, json!({})).unwrap();
+            app.automation_input = false;
+            app.poll_file_dialog();
+            app.poll_file_dialog();
+            if wrapped {
+                assert_eq!(app.historical_replacements.len(), 1);
+                assert!(Arc::ptr_eq(&app.session.active().unwrap().doc, &before));
+                tick_probe(&mut app);
+            }
+            assert!(app.historical_replacements.is_empty());
+            assert!(!app.automation_input);
+            assert_eq!(Arc::ptr_eq(&app.session.active().unwrap().doc, &before), automated);
+            if automated {
+                assert_eq!(app.ui.status, "relink denied by automation policy");
+                assert!(app.session.jobs().is_empty());
+            } else {
+                assert!(matches!(&object(&app).source, SmartSource::Linked { path: linked } if std::path::Path::new(linked) == path));
+            }
+        }
+    }
+}
+
+#[test]
 fn replacement_resumes_only_after_tracked_placement_completes() {
     let picked = modern_pick(false);
     let mut app = app(vec![Some(picked)], HistoricalXcfSampleOrder::BigEndian);

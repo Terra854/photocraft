@@ -164,11 +164,11 @@ pub(crate) fn pick(app: &mut PhotocraftApp, target: Target, name: String, bytes:
     pick_source(app, Action::Replace(target), name, bytes, automated || app.automation_input)
 }
 
-pub(crate) fn pick_relink(app: &mut PhotocraftApp, target: Target, path: String, bytes: Vec<u8>) -> Result<Value, String> {
+pub(crate) fn pick_relink(app: &mut PhotocraftApp, target: Target, path: String, bytes: Vec<u8>, automated: bool) -> Result<Value, String> {
     if cfg!(target_arch = "wasm32") || !std::path::Path::new(&path).is_absolute() {
         return Err(format!("{path}: Relink to File needs a file on disk"));
     }
-    pick_source(app, Action::Relink(target), path, bytes, false)
+    pick_source(app, Action::Relink(target), path, bytes, automated || app.automation_input)
 }
 
 pub(crate) fn pick_place(app: &mut PhotocraftApp, doc: DocId, name: String, bytes: Vec<u8>, linked: bool) -> Result<Value, String> {
@@ -351,10 +351,13 @@ fn apply_source(
     let result = app.with_document(target.doc, |app| {
         if matches!(action, Action::Relink(_)) {
             let expected = photocraft_io::linked::historical_xcf_digest(&bytes);
-            let result = app.run(
-                "layer.smartObjects.relinkToFile",
-                json!({"layer":target.layer.0,"path":name,"historicalXcfSampleOrder":order,"expectedSourceDigest":expected}),
-            )?;
+            // The picker or a header probe can finish on a later frame.
+            let previous = app.automation_input;
+            app.automation_input |= automated;
+            let result =
+                app.run(action.command(), json!({"layer":target.layer.0,"path":name,"historicalXcfSampleOrder":order,"expectedSourceDigest":expected}));
+            app.automation_input = previous;
+            let result = result?;
             if result["pending"].as_bool() == Some(true) {
                 app.historical_replacements.applying = result["job"].as_u64().map(JobId);
             }

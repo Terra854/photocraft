@@ -1,7 +1,7 @@
 //! Pins `.pcraft` serialization of `filter.cameraRaw` Smart Filters (pre-cutover baseline, #587 / #778).
 
 use photocraft_color::{BlendMode, ColorMode, SampleType};
-use photocraft_doc::{Document, Layer, LayerContent, Size, SmartContentsId, SmartFilter, SmartObject, SmartSource};
+use photocraft_doc::{Document, Layer, LayerContent, Size, SmartFilter, SmartObject, SmartSource};
 use photocraft_geom::Affine;
 
 #[test]
@@ -61,30 +61,10 @@ fn pcraft_roundtrips_camera_raw_smart_filter_params() {
     }"#,
     )
     .unwrap();
-    let smart = Layer::new(
-        "RawSmart",
-        LayerContent::Smart(SmartObject {
-            contents_id: SmartContentsId::fresh(),
-            vector_preview: None,
-            source: SmartSource::Embedded { file_name: "inner.png".into(), bytes: std::sync::Arc::new(vec![1, 2, 3, 4]) },
-            transform: Affine::IDENTITY,
-            smart_filters: vec![SmartFilter {
-                command: "filter.cameraRaw".into(),
-                params: params.clone(),
-                blend: BlendMode::Normal,
-                opacity: 1.0,
-                visible: true,
-            }],
-            cache: None,
-            psd_raw: None,
-            filters_enabled: true,
-            filter_mask: None,
-            warp: None,
-            stack_mode: None,
-            perspective: None,
-        }),
-    );
-    doc.layers.push(smart);
+    let mut smart =
+        SmartObject::new(SmartSource::Embedded { file_name: "inner.png".into(), bytes: std::sync::Arc::new(vec![1, 2, 3, 4]) }, Affine::IDENTITY, None);
+    smart.smart_filters.push(SmartFilter { command: "filter.cameraRaw".into(), params: params.clone(), blend: BlendMode::Normal, opacity: 1.0, visible: true });
+    doc.layers.push(Layer::new("RawSmart", LayerContent::Smart(smart)));
 
     let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
     let back = photocraft_format::load_from_bytes(&bytes).unwrap();

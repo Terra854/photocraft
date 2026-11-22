@@ -389,13 +389,23 @@ fn link_length(input: &mut impl PropertyInput, declared: usize, version: Option<
         // A transform's 48-byte length can resemble a link tag four bytes later.
         // Preserve a genuinely framed transform unless the other boundary
         // also leads to a chain of consistently framed link records.
-        let declared_transform = declared.saturating_add(56) <= limit
-            && input.peek(declared, 56)?.is_some_and(|record| {
-                be_u32(record) == Some(49)
-                    && record.get(4..).and_then(be_u32) == Some(48)
-                    && record.get(8..).is_some_and(|payload| super::resources::transform(payload).is_ok())
-            });
-        if !declared_transform
+        let declared_transform = if declared.saturating_add(56) <= limit {
+            input
+                .peek(declared, 56)?
+                .filter(|record| be_u32(record) == Some(49) && record.get(4..).and_then(be_u32) == Some(48))
+                .and_then(|record| super::resources::transform(record.get(8..)?).ok())
+        } else {
+            None
+        };
+        let link_payload = repaired + 8;
+        // Values outside GIMP's interpolation enum cannot outweigh a complete
+        // adjacent link. Still accept unfamiliar transforms as inert metadata
+        // when they are the only credible interpretation.
+        let complete_link = declared_transform.as_ref().is_some_and(|transform| transform.interpolation > 4)
+            && field_end <= limit
+            && input.peek(link_payload, field_end - link_payload)?.is_some_and(|payload| super::resources::link(payload).is_ok());
+        if declared_transform.is_none()
+            || complete_link
             || adjacent_link_ends(input, declared_end, limit)?.is_some()
             || (declared_end != field_end && adjacent_link_ends(input, field_end, limit)?.is_some())
         {
