@@ -180,6 +180,13 @@ impl PlaceSteps {
                 Arc::new(bytes)
             }
         };
+        if let Some(expected) = self.input.expected_source_digest {
+            let actual = photocraft_io::linked::historical_xcf_digest(&self.bytes);
+            ctx.check()?;
+            if actual != expected {
+                return Err(EngineError::Other("the linked source changed since its sample byte order was chosen. Pick the file again".into()));
+            }
+        }
         let (name, fmt) = (&self.input.name, self.input.fmt);
         crate::memory_gate::ensure(&format!("place \u{201c}{}\u{201d}", file_name(name)), crate::memory_gate::place_need(&self.bytes, fmt.bytes_per_pixel()))?;
         // A path isn't read when the input is made, so whether it is a vector source is decided now.
@@ -316,7 +323,7 @@ impl PlaceSteps {
                         return Err(EngineError::Other("the linked source changed while choosing the sample byte order. Pick the file again".into()));
                     }
                 }
-                so.historical_xcf_link_digest = Some(photocraft_io::linked::historical_xcf_digest(&self.bytes));
+                so.historical_xcf_link_digest = Some(input.expected_source_digest.unwrap_or_else(|| photocraft_io::linked::historical_xcf_digest(&self.bytes)));
             }
             // A vector source (SVG) or a frame's image renders at its placement scale instead of
             // as a resampled raster.

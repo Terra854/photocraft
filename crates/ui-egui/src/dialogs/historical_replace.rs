@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 pub(super) const FIELD: &str = "__historicalXcfReplacement";
 const COMMAND: &str = "layer.smartObjects.replaceContents";
+const MAX_QUEUED_SOURCE_BYTES: usize = photocraft_engine::Session::MAX_PENDING_PREFLIGHT_BYTES as usize;
+const MAX_PROMPT_SOURCE_BYTES: usize = 512 << 20;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Target {
@@ -83,12 +85,25 @@ impl Pending {
         self.applying.is_some()
     }
 
-    fn check_retention(&self, source_capacity: usize, limit: usize) -> Result<(), String> {
+    fn check_queue(&self, source_capacity: usize, limit: usize) -> Result<(), String> {
+        let retained = self.held.iter().filter_map(|held| held.bytes.as_ref()).try_fold(source_capacity, |total, bytes| total.checked_add(bytes.capacity()));
+        if self.held.len() >= 8 || retained.is_none_or(|bytes| bytes > limit) {
+            return Err(format!("the queued Smart Object sources exceed the {limit}-byte or eight-source limit"));
+        }
+        Ok(())
+    }
+
+    fn check_prompt_retention(&self, source_capacity: usize, limit: usize) -> Result<(), String> {
         if source_capacity > limit {
             return Err(format!("the retained Smart Object source exceeds the {limit}-byte source limit"));
         }
-        let retained = self.held.iter().filter_map(|held| held.bytes.as_ref()).try_fold(source_capacity, |total, bytes| total.checked_add(bytes.capacity()));
-        if self.held.len() >= 8 || retained.is_none_or(|bytes| bytes > limit) {
+        let retained = self
+            .held
+            .iter()
+            .filter(|held| held.question.is_some())
+            .filter_map(|held| held.bytes.as_ref())
+            .try_fold(source_capacity, |total, bytes| total.checked_add(bytes.capacity()));
+        if retained.is_none_or(|bytes| bytes > limit) {
             return Err("too many sources await a sample-order choice; finish or cancel an earlier choice".into());
         }
         Ok(())
@@ -215,7 +230,11 @@ fn pick_source(app: &mut PhotocraftApp, action: Action, name: String, bytes: Vec
                 return Ok(json!({"job":job.0}));
             }
             Ok(Started::Done(value)) => {
-                finish_probe(app, id, &value)?;
+                if let Err(error) = finish_probe(app, id, &value, MAX_PROMPT_SOURCE_BYTES) {
+                    discard(app, id);
+                    crate::open_prompt::advance(app);
+                    return Err(error);
+                }
             }
             Err(error) => {
                 discard(app, id);
@@ -238,7 +257,11 @@ fn hold(
     inherited_order: Option<photocraft_doc::HistoricalXcfSampleOrder>,
 ) -> Result<u64, String> {
     let pending = &mut app.historical_replacements;
-    pending.check_retention(bytes.as_ref().map_or(0, |bytes| bytes.capacity()), 512 << 20)?;
+    let capacity = bytes.as_ref().map_or(0, |bytes| bytes.capacity());
+    pending.check_queue(capacity, MAX_QUEUED_SOURCE_BYTES)?;
+    if question.is_some() {
+        pending.check_prompt_retention(capacity, MAX_PROMPT_SOURCE_BYTES)?;
+    }
     let id = pending.next.checked_add(1).ok_or("replacement source identity limit reached")?;
     pending.next = id;
     pending.held.push(Held { id, action, automated, name, bytes, question, job: None, inherited_order });
@@ -251,7 +274,7 @@ fn discard(app: &mut PhotocraftApp, id: u64) {
     app.prompt_order.retain(|kind| *kind != PromptKind::Replacement(id));
 }
 
-fn finish_probe(app: &mut PhotocraftApp, id: u64, value: &Value) -> Result<(), String> {
+fn finish_probe(app: &mut PhotocraftApp, id: u64, value: &Value, prompt_limit: usize) -> Result<(), String> {
     let question = match value.get("historical") {
         Some(Value::Null) => None,
         Some(value) => Some(photocraft_io::HistoricalXcfSampleOrderRequest {
@@ -265,17 +288,16 @@ fn finish_probe(app: &mut PhotocraftApp, id: u64, value: &Value) -> Result<(), S
         None => return Err("missing replacement header result".into()),
     };
     let position = app.historical_replacements.held.iter().position(|held| held.id == id).ok_or(tl!("replacement source is gone"))?;
-    app.historical_replacements.held[position].action.check(app)?;
-    if let Some(question) = question {
-        let held = &mut app.historical_replacements.held[position];
-        held.question = Some(question);
-        held.job = None;
-    } else {
-        // A non-XCF envelope needs no byte-order choice. Keep its reservation until
-        // all earlier questions have finished; advance will apply it in order.
-        let held = &mut app.historical_replacements.held[position];
-        held.job = None;
+    let held = &app.historical_replacements.held[position];
+    held.action.check(app)?;
+    if question.is_some() {
+        let capacity = held.bytes.as_ref().map_or(0, |bytes| bytes.capacity());
+        app.historical_replacements.check_prompt_retention(capacity, prompt_limit)?;
     }
+    // Keep the FIFO reservation even if the source needs no byte-order choice.
+    let held = &mut app.historical_replacements.held[position];
+    held.question = question;
+    held.job = None;
     Ok(())
 }
 
@@ -300,7 +322,7 @@ pub(crate) fn on_event(app: &mut PhotocraftApp, event: &JobEvent) -> bool {
     }
     let Some(id) = app.historical_replacements.held.iter().find(|held| held.job == Some(event.id)).map(|held| held.id) else { return false };
     let result = match &event.outcome {
-        JobOutcome::Done(value) => finish_probe(app, id, value),
+        JobOutcome::Done(value) => finish_probe(app, id, value, MAX_PROMPT_SOURCE_BYTES),
         JobOutcome::Failed(error) => Err(error.clone()),
         JobOutcome::Cancelled => Err("cancelled".into()),
     };

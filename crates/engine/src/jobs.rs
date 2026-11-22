@@ -1982,7 +1982,7 @@ impl Session {
                     }
                 }
                 let journal = spec.journal && !historical_xcf_open::is_pending_reply(&v);
-                self.after_command(id, params, journal, automation, Some(nested_from), pre_selected.as_deref(), &record_before);
+                self.after_command(id, params, &v, journal, automation, Some(nested_from), pre_selected.as_deref(), &record_before);
                 Ok(Started::Done(v))
             }
         };
@@ -2077,7 +2077,8 @@ impl Session {
     fn after_command(
         &mut self,
         id: &str,
-        params: Value,
+        mut params: Value,
+        result: &Value,
         journal: bool,
         automation: bool,
         nested_from: Option<usize>,
@@ -2099,6 +2100,14 @@ impl Session {
         }
         if let Some(from) = nested_from.filter(|_| crate::actions_cmds::replayable(id)) {
             self.journal.truncate(from);
+        }
+        // The worker already hashed the exact bytes it decoded. Historical Place Linked
+        // must replay that interpretation against those bytes.
+        if id == "file.placeLinked"
+            && let Some(digest) = result.get("historicalXcfLinkDigest")
+            && let Some(fields) = params.as_object_mut()
+        {
+            fields.insert("expectedSourceDigest".into(), digest.clone());
         }
         let typed = crate::actions_record::typed_layer(self, id, &params);
         let params = match id {
@@ -2237,7 +2246,7 @@ impl Session {
         // Finish successful command bookkeeping on the document the job edited.
         // Restoring the viewed document first would attribute Fade and slice updates
         // to that document instead, when the user switched tabs mid-job.
-        if r.is_ok() {
+        if let Ok(value) = &r {
             if let Some((doc_id, from)) = applied_from {
                 self.note_pixel_change(doc_id, from);
             }
@@ -2245,8 +2254,8 @@ impl Session {
             // polling it now, and only for the recording that owns it: a foreign recording does
             // not get the step.
             // A held placement has not inserted a layer. Replaying this incomplete command would pause again.
-            let journal = *journal && r.as_ref().is_ok_and(|value| !historical_xcf_open::is_pending_reply(value));
-            self.after_command(command, params.clone(), journal, *automation && !foreign, Some(nested_from), pre_selected.as_deref(), before);
+            let journal = *journal && !historical_xcf_open::is_pending_reply(value);
+            self.after_command(command, params.clone(), value, journal, *automation && !foreign, Some(nested_from), pre_selected.as_deref(), before);
             if foreign && let Some((start, _)) = self.actions.recording.as_mut() {
                 *start = self.journal.len();
             }

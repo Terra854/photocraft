@@ -588,6 +588,7 @@ fn contact_sheet(s: &mut Session, p: &Value) -> Result<Value> {
     let mut docs = Vec::new();
     let mut placed = 0usize;
     let mut errors = Vec::new();
+    let mut notices = Vec::new();
     // A full sheet continues on the next one; with `groupByFolder` each folder also starts one.
     for (page, chunk) in groups.iter().flat_map(|g| g.chunks(per_page)).enumerate() {
         let name = format!("ContactSheet-{:03}", page + 1);
@@ -602,11 +603,11 @@ fn contact_sheet(s: &mut Session, p: &Value) -> Result<Value> {
             let (c, r) = if across { (k % cols, k / cols) } else { (k / rows, k % rows) };
             let x0 = hs + f64::from(c) * (cell_w + hs);
             let y0 = vs + f64::from(r) * (cell_h + vs);
-            let thumb = (|| -> Result<photocraft_doc::Surface> {
+            let thumb = (|| -> Result<(photocraft_doc::Surface, Vec<String>)> {
                 let bytes = read_file(path)?;
-                let src = crate::file_cmds::import_with_options(&file_name(path), &bytes, &opts)?;
+                let imported = crate::file_cmds::import_result_with(&file_name(path), &bytes, &opts)?;
                 let mut t = Session::new();
-                t.add_document(src, None);
+                t.add_document(imported.document, None);
                 let (w, h) = t.active().map(|d| (f64::from(d.doc.size.width), f64::from(d.doc.size.height))).unwrap_or((1.0, 1.0));
                 let fit = |w: f64, h: f64| (cell_w / w).min(box_h / h);
                 if rotate && fit(h, w) > fit(w, h) * 1.001 {
@@ -627,15 +628,18 @@ fn contact_sheet(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 let mut surf = photocraft_doc::Surface::new(fmt);
                 surf.write_region(photocraft_geom::Rect::new(ox, oy, ox + tw as i32, oy + th as i32), &data);
-                Ok(surf)
+                Ok((surf, imported.warnings))
             })();
-            let surf = match thumb {
-                Ok(s) => s,
+            let (surf, warnings) = match thumb {
+                Ok(thumb) => thumb,
                 Err(e) => {
                     errors.push(json!({"file": path, "error": e.to_string()}));
                     continue;
                 }
             };
+            if !warnings.is_empty() {
+                notices.push(json!({"file": path, "warnings": warnings}));
+            }
             let label = stem(path);
             s.edit("Contact Sheet", |doc, active| {
                 let l = Layer::new(label.clone(), LayerContent::Raster(surf));
@@ -663,7 +667,11 @@ fn contact_sheet(s: &mut Session, p: &Value) -> Result<Value> {
         }
         docs.push(idx);
     }
-    Ok(json!({"documents": docs, "pages": docs.len(), "images": placed, "errors": errors, "width": pw, "height": ph}))
+    let mut result = json!({"documents": docs, "pages": docs.len(), "images": placed, "errors": errors, "width": pw, "height": ph});
+    if !notices.is_empty() {
+        result["notices"] = json!(notices);
+    }
+    Ok(result)
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -678,7 +686,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.automate.contactSheetII",
             "Contact Sheet II…",
             &["File", "Automate"],
-            r##"{"input":folder|[paths],"historicalXcfSampleOrder":"little-endian|big-endian"?,"units":"inches|cm|mm|pixels"="inches","width":8,"height":10,"resolution":ppi=300,"mode":"rgb|gray|cmyk|lab"="rgb","depth":8|16=8,"columns":5,"rows":6,"placeAcrossFirst":bool=true,"autoSpacing":bool=true,"horizontal":units?,"vertical":units?,"rotateForBestFit":bool=false,"caption":bool=true (file name as caption),"font":family?,"fontSize":pt=12,"flatten":bool=false,"includeSubfolders":bool=true (a folder input also takes its subfolders' images, depth first after its own),"groupByFolder":bool=false (with includeSubfolders: each folder starts a new sheet)} → {documents, pages, images}"##,
+            r##"{"input":folder|[paths],"historicalXcfSampleOrder":"little-endian|big-endian"?,"units":"inches|cm|mm|pixels"="inches","width":8,"height":10,"resolution":ppi=300,"mode":"rgb|gray|cmyk|lab"="rgb","depth":8|16=8,"columns":5,"rows":6,"placeAcrossFirst":bool=true,"autoSpacing":bool=true,"horizontal":units?,"vertical":units?,"rotateForBestFit":bool=false,"caption":bool=true (file name as caption),"font":family?,"fontSize":pt=12,"flatten":bool=false,"includeSubfolders":bool=true (a folder input also takes its subfolders' images, depth first after its own),"groupByFolder":bool=false (with includeSubfolders: each folder starts a new sheet)} → {documents, pages, images, errors, notices?} (import warnings listed per source)"##,
             native,
             contact_sheet
         ),

@@ -13,7 +13,8 @@ saved. GIMP [began writing high-depth samples in network byte order in XCF 12](h
 Select **Little-endian** or **Big-endian** when desktop Open, Replace Contents, or Relink
 to File asks. Edit Contents also asks when an older bundle embeds such a source without a saved
 choice. The chosen order is stored with the Smart Object. Relink keeps the previous choice when
-the source bytes match.
+the source bytes match. Recorded Place Linked actions verify that the file still matches the
+bytes associated with the chosen order.
 
 For CLI Convert, Info, Run, Batch, and Droplet, pass `--historical-xcf-sample-order little-endian` or
 `--historical-xcf-sample-order big-endian`. Use `historical_xcf_sample_order` for MCP `doc_open`
@@ -55,7 +56,9 @@ XCF import.
 Text layers in documents with unequal horizontal and vertical DPI keep their saved pixels.
 Vector layers with an enabled pattern also keep their saved pixels, with the source path
 available separately for editing. Active paint that cannot be decoded, including writer-endian
-float colours without byte-order evidence, also preserves the saved appearance.
+float colours without byte-order evidence, also preserves the saved appearance. Canvas Size
+keeps imported shape pixels when adding or removing canvas area. PSDs saved by PhotoCraft
+carry a private layer tag so PhotoCraft can restore the saved shape and text appearance on reopen.
 
 Saved paths, guides and supported editing-view selections are imported. Floating pixels remain separate raster layers. Unsupported layer effects and optional records are disclosed in the conversion report. Retention limits omit optional data while preserving usable pixels; structural and pixel allocation limits still reject unsafe inputs.
 

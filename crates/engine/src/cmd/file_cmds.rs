@@ -24,7 +24,7 @@ mod batch_run;
 mod export;
 mod info;
 mod open;
-pub(crate) use open::import_result_for_open;
+pub(crate) use open::{expected_source_digest, import_result_for_open, import_result_with};
 mod open_as_smart_object;
 mod paths;
 mod place_steps;
@@ -357,7 +357,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place Linked…",
             &["File"],
             None,
-            r##"{"path":str,"scale":%?,"fit":bool? (default: Preferences > General > Resize Image During Place),"center":[x,y]?,"approveHighMemory":bool=false (explicitly approve high memory usage),"historicalXcfSampleOrder":"little-endian|big-endian"? (required for unmarked multibyte XCF4–11; never inferred),"frame":id|false? (default: selected frame)}"##,
+            r##"{"path":str,"scale":%?,"fit":bool? (default: Preferences > General > Resize Image During Place),"center":[x,y]?,"approveHighMemory":bool=false (explicitly approve high memory usage),"historicalXcfSampleOrder":"little-endian|big-endian"? (required for unmarked multibyte XCF4–11; never inferred),"expectedSourceDigest":[32 BLAKE3 bytes]? (checks the linked source still matches the chosen byte order),"frame":id|false? (default: selected frame)}"##,
             native_doc,
             |s, p| place(s, p, true)
         ),

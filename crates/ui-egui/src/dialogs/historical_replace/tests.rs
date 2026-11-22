@@ -754,12 +754,42 @@ fn picked_replacement_respects_the_automation_command_gate_before_mutation() {
 #[test]
 fn queued_replacement_source_limits_distinguish_a_single_source_from_the_queue() {
     let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
-    assert!(app.historical_replacements.check_retention(17, 16).unwrap_err().contains("16-byte source limit"));
+    assert!(app.historical_replacements.check_queue(17, 16).is_err());
+    assert!(app.historical_replacements.check_prompt_retention(17, 16).unwrap_err().contains("16-byte source limit"));
     let action = Action::Replace(target(&app).unwrap());
     let bytes = Arc::new(vec![0u8; 8]);
-    hold(&mut app, action, false, "first.xcf".into(), Some(bytes), None, None).unwrap();
-    assert!(app.historical_replacements.check_retention(9, 16).unwrap_err().contains("cancel an earlier choice"));
-    assert!(app.historical_replacements.check_retention(8, 16).is_ok());
+    let question = photocraft_io::HistoricalXcfSampleOrderRequest { version: 7, bits_per_sample: 16 };
+    hold(&mut app, action, false, "first.xcf".into(), Some(bytes), Some(question), None).unwrap();
+    assert!(app.historical_replacements.check_queue(9, 16).is_err());
+    assert!(app.historical_replacements.check_prompt_retention(9, 16).unwrap_err().contains("cancel an earlier choice"));
+    assert!(app.historical_replacements.check_prompt_retention(8, 16).is_ok());
+}
+
+#[test]
+fn wrapped_picker_charges_the_choice_limit_only_for_an_ambiguous_header() {
+    use std::io::Write as _;
+
+    let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
+    let action = Action::Replace(target(&app).unwrap());
+    let Picked::Contents(mut modern) = modern_pick(true) else { panic!("wrapped modern source") };
+    let (modern_name, modern_bytes) = modern.pop().unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&fixture::historical_pixel(true)).unwrap();
+    for (name, bytes, ambiguous) in [(modern_name, modern_bytes, false), ("historical.xcf.gz".into(), encoder.finish().unwrap(), true)] {
+        assert!(bytes.capacity() > 16);
+        let question = photocraft_io::historical_xcf_sample_order_request(&name, &bytes).unwrap();
+        assert_eq!(question.is_some(), ambiguous);
+        let value = json!({"historical":question.map(|q| json!({"version":q.version,"bitsPerSample":q.bits_per_sample}))});
+        let id = hold(&mut app, action, false, name, Some(Arc::new(bytes)), None, None).unwrap();
+        let result = finish_probe(&mut app, id, &value, 16);
+        if ambiguous {
+            assert!(result.unwrap_err().contains("16-byte source limit"));
+        } else {
+            result.unwrap();
+            assert!(app.historical_replacements.held.iter().find(|held| held.id == id).unwrap().question.is_none());
+        }
+        discard(&mut app, id);
+    }
 }
 
 #[test]

@@ -186,6 +186,11 @@ fn editable_perceptual_text_matches_saved_raster_before_and_after_native_reopen(
         assert!(matches!(&title.content, LayerContent::Text(text) if text.keep_layer_name && text.cache_uses_raster_blending));
         assert_eq!(photocraft_compose::flatten(document).px, expected.px);
     }
+    let psd = crate::export(&doc, "psd", &Default::default()).unwrap();
+    let reopened = crate::import("saved.psd", &psd.bytes).unwrap().document;
+    let title = reopened.layers.iter().find(|layer| layer.name == "Title").unwrap();
+    assert!(matches!(&title.content, LayerContent::Text(text) if text.cache_uses_raster_blending));
+    assert_eq!(photocraft_compose::flatten(&reopened).px, expected.px);
 }
 
 #[test]

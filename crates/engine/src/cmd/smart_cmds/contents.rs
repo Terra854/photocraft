@@ -38,11 +38,7 @@ fn relink_order(doc: &Document, id: LayerId, candidate: &[u8]) -> Result<Option<
 
 pub(super) fn relink_to_file(s: &mut Session, p: &Value) -> Result<Value> {
     let explicit = p.get("historicalXcfSampleOrder").map(|_| crate::file_cmds::historical_xcf_sample_order(p, RELINK)).transpose()?;
-    let expected = p
-        .get("expectedSourceDigest")
-        .filter(|value| !value.is_null())
-        .map(|value| <[u8; 32] as serde::Deserialize>::deserialize(value).map_err(|_| bad(RELINK, "expectedSourceDigest must be an array of 32 bytes")))
-        .transpose()?;
+    let expected = crate::file_cmds::expected_source_digest(p, RELINK)?;
     let path = path_param(RELINK, p)?.to_string();
     let id = layer_param(s, p)?;
     let snapshot = s.active().ok_or(EngineError::NoDocument)?.doc.clone();

@@ -1237,6 +1237,27 @@ fn editing_a_shape_replaces_its_authoritative_imported_cache() {
 }
 
 #[test]
+fn canvas_size_preserves_and_translates_saved_xcf_shape_pixels() {
+    for (anchor, dx, dy) in [("topLeft", 0, 0), ("center", 5, 3)] {
+        let mut s = session(40, 40, 8);
+        let id = add_imported_shape(&mut s, Rect::new(8, 8, 24, 24));
+        s.edit("retain source appearance", |doc, _| {
+            let LayerContent::Shape(shape) = &mut doc.layer_mut(id).unwrap().content else { panic!("shape") };
+            shape.cache_preserves_appearance = true;
+            Ok(())
+        })
+        .unwrap();
+        let original = photocraft_compose::render(doc(&s), doc(&s).bounds());
+        s.execute("image.canvasSize", json!({"width":50,"height":46,"anchor":anchor,"extensionColor":"transparent"})).unwrap();
+        let shape = shape_layer(doc(&s), id);
+        assert!(shape.cache_preserves_appearance);
+        let original_area = Rect::new(dx, dy, 40 + dx, 40 + dy);
+        assert_eq!(photocraft_compose::render(doc(&s), original_area).px, original.px);
+        assert!(orange_at(&shape, 16 + dx, 16 + dy));
+    }
+}
+
+#[test]
 fn a_shape_reaching_past_the_canvas_renders_again_when_moved() {
     let mut s = session(100, 80, 8);
     // Cut at the canvas's right edge (100 px), so its pixels can't simply be shifted back in.

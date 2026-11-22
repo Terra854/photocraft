@@ -52,3 +52,22 @@ fn ok_runs_the_sheet_with_both_settings() {
     assert_eq!(all, [("ContactSheet-001".to_string(), 2)], "status: {all_status}");
     assert_eq!(grouped, [("ContactSheet-001".to_string(), 1), ("ContactSheet-002".to_string(), 1)], "status: {grouped_status}");
 }
+
+#[test]
+fn contact_sheet_shows_import_warnings_for_a_placed_xcf() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("warning.xcf");
+    std::fs::write(&path, photocraft_testkit::xcf::modern_pixel_with_unmapped_blend()).unwrap();
+    let mut app = app();
+    let result =
+        app.run("file.automate.contactSheetII", json!({"input":[path],"units":"pixels","width":24,"height":24,"columns":1,"rows":1,"caption":false})).unwrap();
+    assert_eq!(result["images"], 1);
+    assert_eq!(result["errors"], json!([]));
+    let notices = result["notices"].as_array().unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0]["file"], json!(path));
+    let warning = notices[0]["warnings"].as_array().unwrap().first().unwrap().as_str().unwrap();
+    let line = format!("{}: {warning}", path.display());
+    let shown = crate::notices::shown(&app, app.ctx());
+    assert!(shown.iter().any(|(_, lines, _)| lines.contains(&line)), "{shown:?}");
+}

@@ -77,7 +77,7 @@ pub(super) fn import_source_at_raw_ppi(raw_ppi: f64, name: &str, bytes: &[u8], o
 /// The one import path every caller shares: allocation checkpoint, native `.pcraft` and format
 /// dispatch through `photocraft_io::import_with_options`, typed memory refusals, and the
 /// preview-only refusal wherever the import came from.
-pub(super) fn import_result_with(name: &str, bytes: &[u8], opts: &photocraft_io::ImportOptions) -> Result<photocraft_io::ImportResult> {
+pub(crate) fn import_result_with(name: &str, bytes: &[u8], opts: &photocraft_io::ImportOptions) -> Result<photocraft_io::ImportResult> {
     import_result_for_open(name, bytes, opts, &photocraft_raster::Interrupt::NONE).map(|(r, _)| r)
 }
 
@@ -407,6 +407,18 @@ pub(crate) fn place_input(s: &mut Session, input: PlaceInput) -> Result<Value> {
     crate::jobs::run_stepped(s, &label, true, PlaceSteps::new(input, s.cooperative_jobs()), apply_place)
 }
 
+/// Parses the snapshot digest shared by linked Place and Relink.
+pub(crate) fn expected_source_digest(params: &Value, command: &str) -> Result<Option<[u8; 32]>> {
+    params
+        .get("expectedSourceDigest")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            <[u8; 32] as serde::Deserialize>::deserialize(value)
+                .map_err(|_| EngineError::BadParams { cmd: command.into(), msg: "expectedSourceDigest must be an array of 32 bytes".into() })
+        })
+        .transpose()
+}
+
 /// The file a place reads.
 pub(super) enum PlaceFile {
     /// Its contents, already read (a dropped or picked file with no path, a script's bytes).
@@ -422,6 +434,7 @@ pub(crate) struct PlaceInput {
     pub(super) name: String,
     pub(super) file: PlaceFile,
     pub(super) linked: Option<String>,
+    pub(super) expected_source_digest: Option<[u8; 32]>,
     pub(super) params: Value,
     pub(super) canvas: (f64, f64),
     /// The document's resolution (ppi): a placed file keeps its physical size in it.
@@ -493,6 +506,7 @@ impl PlaceInput {
             },
             frame,
             params: p.clone(),
+            expected_source_digest: if linked.is_some() { expected_source_digest(p, cmd)? } else { None },
             file,
             linked,
         })
@@ -555,6 +569,10 @@ pub(crate) fn apply_place(s: &mut Session, outcome: PlaceOutcome) -> Result<Valu
         }
     };
     let Prepared { warnings, content, layer_name, label, scale, bounds, smart, frame } = *prepared;
+    let link_digest = match &content {
+        LayerContent::Smart(smart) => smart.historical_xcf_link_digest,
+        _ => None,
+    };
     let layer = Layer::new(layer_name, content);
     let id = layer.id;
     s.edit(label, move |doc, active| {
@@ -567,7 +585,11 @@ pub(crate) fn apply_place(s: &mut Session, outcome: PlaceOutcome) -> Result<Valu
         }
         Ok(())
     })?;
-    Ok(json!({"layer": id.0, "frame": frame.map(|f| f.0), "scale": scale * 100.0, "bounds": bounds, "smartObject": smart, "warnings": warnings}))
+    let mut result = json!({"layer": id.0, "frame": frame.map(|f| f.0), "scale": scale * 100.0, "bounds": bounds, "smartObject": smart, "warnings": warnings});
+    if let Some(digest) = link_digest {
+        result["historicalXcfLinkDigest"] = json!(digest);
+    }
+    Ok(result)
 }
 
 pub(super) fn place(s: &mut Session, p: &Value, linked: bool) -> Result<Value> {

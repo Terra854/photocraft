@@ -207,13 +207,16 @@ fn cubic_shape_fill_stroke_and_auxiliary_axes_use_native_geometry_and_rendering(
 }
 
 #[test]
-fn clipping_and_layer_effects_use_saved_xcf_shape_coverage_after_native_reopen() {
+fn clipping_and_layer_effects_use_saved_xcf_shape_coverage_after_native_or_psd_reopen() {
     use photocraft_doc::Layer;
     use photocraft_doc::effects::{Effect, FxCommon, FxPaint, StrokeFx, StrokePosition};
 
     let doc = photocraft_io::import("aliased.xcf", &source_with_appearance(false, 73, 2, false, 2)).unwrap().document;
-    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
-    for mut doc in [doc, photocraft_format::load_from_bytes(&bytes).unwrap()] {
+    let native = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    let psd = photocraft_io::export(&doc, "psd", &Default::default()).unwrap();
+    let psd = photocraft_io::import("saved.psd", &psd.bytes).unwrap().document;
+    for mut doc in [doc, photocraft_format::load_from_bytes(&native).unwrap(), psd] {
+        assert!(matches!(&doc.layers[0].content, LayerContent::Shape(shape) if shape.cache_preserves_appearance));
         let rect = doc.bounds();
         let baseline = photocraft_compose::render(&doc, rect);
         let native_shape = doc.layers[0].surface().unwrap().clone();

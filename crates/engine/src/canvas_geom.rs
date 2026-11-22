@@ -331,6 +331,8 @@ pub(crate) fn transform_geometry(doc: &mut Document, a: &Affine) {
 pub(crate) enum Refresh {
     /// Shapes only (their pixels are clipped to the canvas, which may have grown).
     Shapes,
+    /// Canvas Size translates stored pixels without editing the shapes.
+    CanvasBounds,
     /// Type, shapes and smart objects (after a resampling map: Image Size, Image Rotation ›
     /// Arbitrary). Smart objects whose source is unavailable keep their (already mapped) cache;
     /// so does type set in a font that isn't installed ([`keeps_own_pixels`]), which the caller
@@ -366,7 +368,9 @@ pub(crate) fn refresh(doc: &mut Document, what: Refresh) {
         for l in layers {
             match &mut l.content {
                 LayerContent::Group(g) => rec(snapshot, &mut g.children, what),
-                LayerContent::Shape(sh) => crate::vector_cmds::refresh_shape(snapshot, sh),
+                LayerContent::Shape(sh) if what != Refresh::CanvasBounds || !sh.cache_preserves_appearance || sh.cache.is_none() => {
+                    crate::vector_cmds::refresh_shape(snapshot, sh);
+                }
                 LayerContent::Text(t) if what == Refresh::All && !keeps_own_pixels(t) => crate::type_cmds::refresh(snapshot, t),
                 LayerContent::Smart(_) if what == Refresh::All => {
                     let _ = crate::smart_cmds::refresh_layer(snapshot, l);

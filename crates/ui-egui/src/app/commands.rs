@@ -249,6 +249,7 @@ impl PhotocraftApp {
                 crate::dialogs::image_processor_ui::COMMAND => Some(tl!("Image Processor…").trim_end_matches('…')),
                 crate::dialogs::stack_dialog::COMMAND => Some(tl!("Load Files into Stack…").trim_end_matches('…')),
                 crate::dialogs::stack_dialog::STATISTICS => Some(tl!("Image Statistics")),
+                "file.automate.contactSheetII" => Some(tl!("Contact Sheet II")),
                 _ => None,
             };
             if let Some(label) = label {

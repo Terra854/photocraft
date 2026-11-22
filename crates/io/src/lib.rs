@@ -71,6 +71,7 @@ mod pdf_import;
 mod pdn;
 pub use pcraft_cache::PcraftExportCache;
 pub mod pixels;
+mod psd_appearance;
 pub mod psd_budget;
 mod psd_export;
 mod psd_gate;

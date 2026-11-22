@@ -13,6 +13,7 @@ use photocraft_raster::{Interrupt, Surface};
 use crate::adjust_map;
 use crate::blocks;
 use crate::pixels::{deinterleave, encode_be, psd_depth};
+use crate::psd_appearance::{self, Appearance};
 use crate::psd_import::REGENERATED;
 
 mod banded;
@@ -475,6 +476,7 @@ impl Ex<'_> {
         // Known source hints are regenerated, so resetting/replacing the source cannot
         // copy an obsolete interpretation. Unknown/future payloads stay verbatim and inert.
         raw.retain(|(key, bytes)| key != &crate::smart_xcf_order::PSD_KEY || crate::smart_xcf_order::parse(bytes).is_none());
+        raw.retain(|(key, bytes)| key != &psd_appearance::PSD_KEY || Appearance::parse(bytes).is_none());
         let mut regenerated: Vec<([u8; 4], Vec<u8>)> = Vec::new();
         // `keys` is in the importer's priority order (`psd_raw` came from the first key present),
         // not file order: Photoshop writes `PlLd` before `SoLd`, and overwriting the first match
@@ -558,8 +560,16 @@ impl Ex<'_> {
                 }
                 let (w, h) = (self.canvas.width(), self.canvas.height());
                 crate::vector_map::shape_blocks(sh, &mut raw, w, h, self.dpi);
+                if sh.cache_preserves_appearance && sh.cache.is_some() {
+                    regenerated.push((psd_appearance::PSD_KEY, Appearance::Shape.encode()));
+                }
             }
-            LayerContent::Text(t) => self.type_blocks(l, t, &mut raw),
+            LayerContent::Text(t) => {
+                self.type_blocks(l, t, &mut raw);
+                if t.cache_uses_raster_blending && t.cache.is_some() && raw.iter().any(|(key, _)| key == b"TySh") {
+                    regenerated.push((psd_appearance::PSD_KEY, Appearance::Text.encode()));
+                }
+            }
             LayerContent::Smart(sm) => {
                 raw.extend(sm.historical_xcf_sample_order.map(|order| (crate::smart_xcf_order::PSD_KEY, crate::smart_xcf_order::encode(order))));
                 if let Some(preview) = self.smart.vector_preview(sm) {

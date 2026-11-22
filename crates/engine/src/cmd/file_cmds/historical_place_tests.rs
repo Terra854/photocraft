@@ -168,10 +168,26 @@ fn confirmed_disk_placement_records_one_replayable_action_step() {
         assert_eq!(steps[0].params["frame"], false);
         assert!(steps[0].params.get("askHistoricalXcfSampleOrder").is_none());
         assert!(steps[0].params.get("verifyHistoricalXcfLink").is_none());
+        if command == "file.placeLinked" {
+            assert_eq!(steps[0].params["expectedSourceDigest"], json!(photocraft_io::linked::historical_xcf_digest(&fixture::historical_pixel(true))));
+        } else {
+            assert!(steps[0].params.get("expectedSourceDigest").is_none());
+        }
         let mut replay = session();
         replay.actions.list = s.actions.list.clone();
         replay.execute("actions.play", json!({"action":"Place source"})).unwrap();
         assert_eq!(active_smart(&replay).unwrap().historical_xcf_sample_order, Some(LittleEndian));
+        if command == "file.placeLinked" {
+            std::fs::write(&path, fixture::historical_pixel(false)).unwrap();
+            let mut changed = session();
+            changed.actions.list = s.actions.list.clone();
+            let before = changed.active().unwrap().doc.clone();
+            let result = changed.execute("actions.play", json!({"action":"Place source"})).unwrap();
+            assert_eq!(result["ran"], 0);
+            let error = result["failed"]["error"].as_str().unwrap();
+            assert!(error.contains("changed since its sample byte order was chosen"), "{result}");
+            assert_eq!(changed.active().unwrap().doc.layers, before.layers);
+        }
     }
 }
 
