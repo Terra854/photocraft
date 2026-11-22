@@ -742,12 +742,85 @@ fn picked_replacement_respects_the_automation_command_gate_before_mutation() {
             "picked.xcf",
             Some(Arc::new(fixture::historical_pixel(true))),
             Some(HistoricalXcfSampleOrder::LittleEndian),
+            false,
         )
         .unwrap_err();
         assert_eq!(err, "replacement denied by automation policy");
         assert!(Arc::ptr_eq(&app.session.active().unwrap().doc, &before));
         assert!(app.session.jobs().is_empty());
     }
+}
+
+#[test]
+fn queued_replacement_source_limits_distinguish_a_single_source_from_the_queue() {
+    let mut app = app(Vec::new(), HistoricalXcfSampleOrder::BigEndian);
+    assert!(app.historical_replacements.check_retention(17, 16).unwrap_err().contains("16-byte source limit"));
+    let action = Action::Replace(target(&app).unwrap());
+    let bytes = Arc::new(vec![0u8; 8]);
+    hold(&mut app, action, false, "first.xcf".into(), Some(bytes), None, None).unwrap();
+    assert!(app.historical_replacements.check_retention(9, 16).unwrap_err().contains("cancel an earlier choice"));
+    assert!(app.historical_replacements.check_retention(8, 16).is_ok());
+}
+
+#[test]
+fn deferred_replacement_keeps_the_picker_automation_policy() {
+    for automated in [false, true] {
+        let mut app = app(vec![Some(modern_pick(true))], HistoricalXcfSampleOrder::BigEndian);
+        app.session.set_cooperative_jobs(true);
+        let before = app.session.active().unwrap().doc.clone();
+        let expected_layer = app.session.active().unwrap().active_layer.unwrap();
+        app.services.automation_command = Some(Box::new(move |id, params| {
+            assert_eq!(id, COMMAND);
+            // The menu checks the command before the picker has a source. Deny the
+            // layer-specific apply, which also has to be checked in a later frame.
+            if params["layer"].is_null() {
+                return Ok(());
+            }
+            assert_eq!(params["layer"], expected_layer.0);
+            Err("replacement denied by automation policy".into())
+        }));
+        app.automation_input = automated;
+        crate::menus::invoke(&mut app, &egui::Context::default(), COMMAND, json!({})).unwrap();
+        app.automation_input = false;
+        app.poll_file_dialog();
+        app.poll_file_dialog();
+        assert_eq!(app.historical_replacements.len(), 1);
+        assert!(Arc::ptr_eq(&app.session.active().unwrap().doc, &before));
+        tick_probe(&mut app);
+        assert!(app.historical_replacements.is_empty());
+        assert!(app.prompt_order.is_empty());
+        assert_eq!(Arc::ptr_eq(&app.session.active().unwrap().doc, &before), automated);
+        if automated {
+            assert_eq!(app.ui.status, "replacement denied by automation policy");
+        }
+    }
+}
+
+#[test]
+fn replacement_resumes_only_after_tracked_placement_completes() {
+    let picked = modern_pick(false);
+    let mut app = app(vec![Some(picked)], HistoricalXcfSampleOrder::BigEndian);
+    app.session.set_cooperative_jobs(true);
+    let before = app.session.active().unwrap().doc.clone();
+    let place = app.place_bytes("placement.xcf", fixture::modern_pixel(0x1234), None, None).unwrap();
+    assert!(crate::jobs_ui::track_place(&mut app, "placement.xcf", &place));
+    pick_from_menu(&mut app);
+    assert_eq!(app.historical_replacements.len(), 1);
+    assert!(Arc::ptr_eq(&app.session.active().unwrap().doc, &before));
+    assert!(app.ui.transform.is_none());
+
+    for _ in 0..16 {
+        if app.jobs.place.is_none() {
+            break;
+        }
+        tick_probe(&mut app);
+    }
+    assert!(app.jobs.place.is_none());
+    assert!(app.historical_replacements.is_empty());
+    assert!(app.prompt_order.is_empty());
+    assert_eq!(app.session.active().unwrap().doc.layers.len(), 2);
+    assert!(app.ui.transform.is_some() || app.transform_preparing.is_some());
+    assert!(app.ui.status.contains("target changed"), "{}", app.ui.status);
 }
 
 #[test]
@@ -774,6 +847,7 @@ fn inline_replacement_shows_the_warning_for_retained_unsupported_filters() {
         "picked.xcf",
         Some(Arc::new(fixture::historical_pixel(true))),
         Some(HistoricalXcfSampleOrder::LittleEndian),
+        false,
     )
     .unwrap();
     let warning = result["warnings"][0].as_str().unwrap();

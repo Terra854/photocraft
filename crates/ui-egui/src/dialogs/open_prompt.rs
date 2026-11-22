@@ -88,7 +88,11 @@ pub struct MemoryPrompt {
 
 /// Whether a file that just finished reading has to wait: one earlier in the queue does.
 pub fn waiting(app: &PhotocraftApp) -> bool {
-    !app.held_opens.is_empty() || !app.held_memory_prompts.is_empty() || !app.historical_opens.is_empty() || !app.historical_replacements.is_empty()
+    app.jobs.place.is_some()
+        || !app.held_opens.is_empty()
+        || !app.held_memory_prompts.is_empty()
+        || !app.historical_opens.is_empty()
+        || !app.historical_replacements.is_empty()
 }
 
 /// Opens `held` now, or queues it behind the file whose prompt is up.
@@ -174,7 +178,7 @@ pub(crate) fn answer_prompt(app: &mut PhotocraftApp, _ctx: &egui::Context, answe
 
 /// Opens queued files in order until one needs its prompt, which is shown if it isn't yet.
 pub fn advance(app: &mut PhotocraftApp) {
-    if app.historical_replacements.applying() {
+    if app.jobs.place.is_some() || app.historical_replacements.applying() {
         return;
     }
     // Reconcile legacy callers that populated held queues directly.
@@ -295,7 +299,7 @@ pub fn answer(app: &mut PhotocraftApp, action: Option<&str>) -> Result<Value, St
     if action.is_some() && matches!(app.prompt_order.front(), Some(PromptKind::Historical(_) | PromptKind::Resuming(_) | PromptKind::Replacement(_))) {
         return Err("answer the historical XCF choice first".into());
     }
-    if app.held_opens.front().is_some_and(|h| h.damage_pending) {
+    if matches!(app.prompt_order.front(), None | Some(PromptKind::Open)) && app.held_opens.front().is_some_and(|h| h.damage_pending) {
         return Err("answer the damaged PSD confirmation first".into());
     }
     let Some(action) = action else {
@@ -337,7 +341,7 @@ pub fn answer_remembering(app: &mut PhotocraftApp, action: &str) -> Result<Value
     if matches!(app.prompt_order.front(), Some(PromptKind::Historical(_) | PromptKind::Resuming(_) | PromptKind::Replacement(_))) {
         return Err("answer the historical XCF choice first".into());
     }
-    if app.held_opens.front().is_some_and(|h| h.damage_pending) {
+    if matches!(app.prompt_order.front(), None | Some(PromptKind::Open)) && app.held_opens.front().is_some_and(|h| h.damage_pending) {
         return Err("answer the damaged PSD confirmation first".into());
     }
     let Some(key) = app.held_opens.front().and_then(|h| policy_key(h.doc.mode)) else { return answer(app, Some(action)) };

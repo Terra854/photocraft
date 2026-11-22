@@ -723,7 +723,8 @@ pub(super) fn front(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option
                 Ok(target) => target,
                 Err(error) => return Some(Err(error)),
             };
-            Some(app.pick_file_bytes(move |app, name, bytes| crate::dialogs::historical_replace::pick(app, target, name, bytes)))
+            let automated = app.automation_input;
+            Some(app.pick_file_bytes(move |app, name, bytes| crate::dialogs::historical_replace::pick(app, target, name, bytes, automated)))
         }
         "layer.smartObjects.exportContents" => Some(export_contents(app)),
         "layer.smartObjects.relinkToFile" => {

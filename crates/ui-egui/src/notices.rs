@@ -204,6 +204,20 @@ pub fn io_result_warnings(app: &mut PhotocraftApp, result: &serde_json::Value, w
     io_warnings(app, what, &warnings);
 }
 
+/// Show the warnings from a command that reports diagnostics per source or output file.
+pub(crate) fn file_result_warnings(app: &mut PhotocraftApp, result: &serde_json::Value, what: &str) {
+    let warnings: Vec<String> = result["notices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|notice| {
+            let file = notice["file"].as_str().unwrap_or_default();
+            notice["warnings"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).map(move |message| format!("{file}: {message}"))
+        })
+        .collect();
+    io_warnings(app, what, &warnings);
+}
+
 /// Hand the outbox to the window's toast queue and collect how the queued notices ended. Auto-hide
 /// (Interface › Notification) is the queue's timeout; the queue holds a card while the pointer rests
 /// on it. A second pass in the same frame finds the outbox empty and the ends already reported, so

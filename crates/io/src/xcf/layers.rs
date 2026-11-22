@@ -265,7 +265,7 @@ impl<'a> Image<'a> {
             Some(metadata) => (
                 if hptr == 0 { ConversionReason::ResourceUnavailable } else { ConversionReason::NativePolicy },
                 format!(
-                    "Link resource {}x{}, flags {}, nonempty locator {} bytes retained inert; {}",
+                    "Link resource {}x{}, flags {}, decoded a {}-byte locator without resolving it; {}",
                     metadata.width,
                     metadata.height,
                     metadata.flags,
@@ -274,7 +274,7 @@ impl<'a> Image<'a> {
                 ),
             ),
             None if limited => (ConversionReason::RetentionLimit, "Link locator exceeded the shared decode-work allowance".into()),
-            None => (ConversionReason::InvalidOptionalData, "Invalid optional link-resource configuration retained inert".into()),
+            None => (ConversionReason::InvalidOptionalData, "Could not decode the optional link-resource configuration".into()),
         };
         self.outcomes.notice(
             outcome,

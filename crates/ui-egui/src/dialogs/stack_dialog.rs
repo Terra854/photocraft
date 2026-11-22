@@ -16,7 +16,7 @@ use crate::dialogs::params;
 
 /// The command id of Load Files into Stack, which is also its dialog's key.
 pub const COMMAND: &str = "file.scripts.loadFilesIntoStack";
-const STATISTICS: &str = "file.scripts.statistics";
+pub(crate) const STATISTICS: &str = "file.scripts.statistics";
 
 /// Whether `key` is the key of one of these two dialogs.
 pub(crate) fn owns(key: &str) -> bool {

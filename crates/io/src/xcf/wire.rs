@@ -356,8 +356,8 @@ fn repair_palette_boundary(
         return Ok(true);
     }
 
-    let declared = property_continuation(input, declared, version, ctl)?;
-    let repaired = property_continuation(input, repaired, version, ctl)?;
+    let declared = property_continuation(input, declared, version, true, ctl)?;
+    let repaired = property_continuation(input, repaired, version, true, ctl)?;
     if let (Some(left), Some(right)) = (declared.end, repaired.end)
         && let Some(preference) = input.compare_palette_tables(left, right, version, ctl)?
     {
@@ -380,32 +380,48 @@ fn link_length(input: &mut impl PropertyInput, declared: usize, version: Option<
     if link_wire_length(input, 0, declared, MAX_STRING + 16)? != Some(repaired) {
         return Ok(declared);
     }
-    // The next link can itself declare a short length. Its bounded locator
-    // framing identifies the adjacent property even when a shifted list also
-    // reaches a terminator.
+    // A second link can itself undercount its payload. Its typed framing
+    // supplies evidence even when the shifted list reaches a terminator.
     let limit = input.palette_lookahead_limit();
-    if starts_link(input, repaired, limit)? && !starts_link(input, declared, limit)? {
-        return Ok(repaired);
+    let adjacent = adjacent_link_ends(input, repaired, limit)?;
+    let adjacent = if adjacent.is_some() && adjacent_link_ends(input, declared, limit)?.is_none() { adjacent } else { None };
+    if let Some((declared_end, field_end)) = adjacent {
+        // A transform's 48-byte length can resemble a link tag four bytes later.
+        // Preserve a genuinely framed transform unless the other boundary
+        // also leads to a chain of consistently framed link records.
+        let declared_transform = declared.saturating_add(56) <= limit
+            && input.peek(declared, 56)?.is_some_and(|record| {
+                be_u32(record) == Some(49)
+                    && record.get(4..).and_then(be_u32) == Some(48)
+                    && record.get(8..).is_some_and(|payload| super::resources::transform(payload).is_ok())
+            });
+        if !declared_transform
+            || adjacent_link_ends(input, declared_end, limit)?.is_some()
+            || (declared_end != field_end && adjacent_link_ends(input, field_end, limit)?.is_some())
+        {
+            return Ok(repaired);
+        }
+        let left = property_continuation(input, declared, version.unwrap_or(25), false, ctl)?;
+        return Ok(if left.end.is_some_and(|end| input.link_drawable_framed(end)) { declared } else { repaired });
     }
-    let left = property_continuation(input, declared, version.unwrap_or(25), ctl)?;
-    let right = property_continuation(input, repaired, version.unwrap_or(25), ctl)?;
+    let left = property_continuation(input, declared, version.unwrap_or(25), false, ctl)?;
     let left_framed = left.end.is_some_and(|end| input.link_drawable_framed(end));
+    let right = property_continuation(input, repaired, version.unwrap_or(25), false, ctl)?;
     let right_framed = right.end.is_some_and(|end| input.link_drawable_framed(end));
     let extend =
         if left_framed != right_framed { right_framed } else { right.end.is_some() && (left.end.is_none() || right.unusual_lengths < left.unusual_lengths) };
     Ok(if extend { repaired } else { declared })
 }
 
-fn starts_link(input: &mut impl PropertyInput, offset: usize, limit: usize) -> Result<bool> {
-    if offset.checked_add(8).is_none_or(|end| end > limit) {
-        return Ok(false);
-    }
-    let Some(header) = input.peek(offset, 8)? else { return Ok(false) };
+fn adjacent_link_ends(input: &mut impl PropertyInput, offset: usize, limit: usize) -> Result<Option<(usize, usize)>> {
+    let Some(payload) = offset.checked_add(8).filter(|end| *end <= limit) else { return Ok(None) };
+    let Some(header) = input.peek(offset, 8)? else { return Ok(None) };
     if be_u32(header) != Some(48) {
-        return Ok(false);
+        return Ok(None);
     }
-    let Some(length) = header.get(4..).and_then(be_u32) else { return Ok(false) };
-    Ok(link_wire_length(input, offset + 8, length as usize, limit)?.is_some())
+    let Some(length) = header.get(4..).and_then(be_u32).map(|word| word as usize) else { return Ok(None) };
+    let Some(fields) = link_wire_length(input, payload, length, limit)? else { return Ok(None) };
+    Ok(Some((payload + length, payload.saturating_add(fields))))
 }
 
 /// The field-sized link record with a bounded locator and room for its declared bytes.
@@ -439,6 +455,7 @@ fn property_continuation(
     input: &mut impl PropertyInput,
     mut offset: usize,
     version: u32,
+    palettes: bool,
     ctl: &photocraft_raster::Interrupt<'_>,
 ) -> Result<PropertyContinuation> {
     let limit = input.palette_lookahead_limit();
@@ -485,9 +502,15 @@ fn property_continuation(
         }
         // These records have their own historical length rules. A probe that
         // cannot establish their framing gives no evidence against this boundary.
-        if matches!(kind, 1 | 48) {
+        if kind == 48 || (kind == 1 && !palettes) {
             break;
         }
+        let length = if kind == 1 {
+            let Some(length) = following_palette_length(input, offset + 8, length, version, limit)? else { break };
+            length
+        } else {
+            length
+        };
         if length > MAX_PAYLOAD {
             continuation.invalid = true;
             break;
@@ -502,6 +525,33 @@ fn property_continuation(
         offset = next;
     }
     Ok(continuation)
+}
+
+/// Skip a subsequent palette when its length or neighboring header identifies
+/// its frame. Leave competing ambiguous palettes to the normal reader.
+fn following_palette_length(input: &mut impl PropertyInput, offset: usize, declared: usize, version: u32, limit: usize) -> Result<Option<usize>> {
+    if declared < 4 || version == 0 || offset.saturating_add(4) > limit {
+        return Ok(Some(declared));
+    }
+    let Some(colors) = input.peek(offset, 4)?.and_then(be_u32).map(|value| value as usize) else { return Ok(None) };
+    if !(1..=256).contains(&colors) || declared != 4 + colors {
+        return Ok(Some(declared));
+    }
+    let repaired = 4 + colors * 3;
+    let mut header = |length: usize| -> Result<Option<(u32, u32)>> {
+        let boundary = offset.saturating_add(length);
+        if boundary.saturating_add(8) > limit {
+            return Ok(None);
+        }
+        Ok(input.peek(boundary, 8)?.filter(|bytes| plausible_property(Some(bytes))).and_then(|bytes| Some((be_u32(bytes)?, be_u32(bytes.get(4..)?)?))))
+    };
+    let left = header(declared)?;
+    let right = header(repaired)?;
+    Ok(match (left, right) {
+        (Some(_), None) | (Some((0, 0)), Some(_)) => Some(declared),
+        (None, Some(_)) | (Some((0, 1..)), Some((0, 0) | (17, 1) | (19, 8))) => Some(repaired),
+        _ => None,
+    })
 }
 
 /// A bounded neighboring header is evidence for a palette boundary.

@@ -53,6 +53,21 @@ fn image_processor_dialog_shows_the_xcf_export_warning() {
 }
 
 #[test]
+fn image_processor_returns_and_shows_warnings_with_background_jobs_enabled() {
+    let (mut app, _, _) = open();
+    let input = tempfile::tempdir().unwrap();
+    let path = input.path().join("input.xcf");
+    std::fs::write(&path, crate::historical_xcf_fixture::modern_pixel_with_unmapped_blend()).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    app.background_jobs = true;
+    let result = app.run(super::COMMAND, json!({"source":"folder","input":[path],"output":output.path(),"format":"psd"})).unwrap();
+    assert!(result.get("pending").is_none(), "{result}");
+    assert_eq!(result["files"].as_array().unwrap().len(), 1);
+    assert!(!app.session.has_jobs());
+    assert!(app.ui.notices.iter().flat_map(|notice| &notice.lines).any(|line| line.contains("input.psd") && line.contains("retained source configuration")));
+}
+
+#[test]
 fn run_dispatches_all_enabled_formats_with_their_own_dimensions() {
     let (mut app, ctx, id) = open();
     let directory = tempfile::tempdir().unwrap();

@@ -80,6 +80,24 @@ fn statistics_browse_and_mode_selection_compute_the_chosen_statistic() {
 }
 
 #[test]
+fn load_stack_dialog_shows_the_historical_xcf_sample_order_warning() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("historical.xcf");
+    std::fs::write(&path, crate::historical_xcf_fixture::historical_pixel(false)).unwrap();
+    let mut h = harness(vec![]);
+    let id = open(h.state_mut());
+    h.run_steps(3);
+    set(&mut h, id, "files", json!({"files": [path], "folder": "", "useFolder": false}));
+    set(&mut h, id, "historicalXcfSampleOrder", json!("big-endian"));
+    let ctx = h.ctx.clone();
+    crate::dialogs::confirm(h.state_mut(), &ctx, id).unwrap();
+    assert_eq!(h.state().session.documents().len(), 1);
+    assert!(
+        h.state().ui.notices.iter().flat_map(|notice| &notice.lines).any(|line| line.contains("historical.xcf") && line.contains("explicit big-endian choice"))
+    );
+}
+
+#[test]
 fn statistics_folder_and_alignment_reach_the_engine() {
     let (dir, paths) = pngs("statistics-folder", &["one.png", "two.png"]);
     // Auto-Align needs identifiable detail, not a uniform tiny colour swatch.

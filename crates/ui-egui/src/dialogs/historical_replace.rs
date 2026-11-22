@@ -55,6 +55,7 @@ impl Action {
 struct Held {
     id: u64,
     action: Action,
+    automated: bool,
     name: String,
     bytes: Option<Arc<Vec<u8>>>,
     question: Option<photocraft_io::HistoricalXcfSampleOrderRequest>,
@@ -81,6 +82,17 @@ impl Pending {
     pub(crate) fn applying(&self) -> bool {
         self.applying.is_some()
     }
+
+    fn check_retention(&self, source_capacity: usize, limit: usize) -> Result<(), String> {
+        if source_capacity > limit {
+            return Err(format!("the retained Smart Object source exceeds the {limit}-byte source limit"));
+        }
+        let retained = self.held.iter().filter_map(|held| held.bytes.as_ref()).try_fold(source_capacity, |total, bytes| total.checked_add(bytes.capacity()));
+        if self.held.len() >= 8 || retained.is_none_or(|bytes| bytes > limit) {
+            return Err("too many sources await a sample-order choice; finish or cancel an earlier choice".into());
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn target(app: &PhotocraftApp) -> Result<Target, String> {
@@ -103,7 +115,7 @@ pub(crate) fn prompt_edit(
 ) -> Result<Value, String> {
     let state = app.session.active().ok_or("no document")?;
     let target = target_in(state, layer)?;
-    let id = hold(app, Action::Edit(target), source_name, None, Some(question), None)?;
+    let id = hold(app, Action::Edit(target), false, source_name, None, Some(question), None)?;
     crate::open_prompt::advance(app);
     Ok(json!({"heldHistoricalXcfEdit": id}))
 }
@@ -148,24 +160,24 @@ impl StepWork<Option<photocraft_io::HistoricalXcfSampleOrderRequest>> for ProbeW
     }
 }
 
-pub(crate) fn pick(app: &mut PhotocraftApp, target: Target, name: String, bytes: Vec<u8>) -> Result<Value, String> {
-    pick_source(app, Action::Replace(target), name, bytes)
+pub(crate) fn pick(app: &mut PhotocraftApp, target: Target, name: String, bytes: Vec<u8>, automated: bool) -> Result<Value, String> {
+    pick_source(app, Action::Replace(target), name, bytes, automated || app.automation_input)
 }
 
 pub(crate) fn pick_relink(app: &mut PhotocraftApp, target: Target, path: String, bytes: Vec<u8>) -> Result<Value, String> {
     if cfg!(target_arch = "wasm32") || !std::path::Path::new(&path).is_absolute() {
         return Err(format!("{path}: Relink to File needs a file on disk"));
     }
-    pick_source(app, Action::Relink(target), path, bytes)
+    pick_source(app, Action::Relink(target), path, bytes, false)
 }
 
 pub(crate) fn pick_place(app: &mut PhotocraftApp, doc: DocId, name: String, bytes: Vec<u8>, linked: bool) -> Result<Value, String> {
     let state = app.session.documents().iter().find(|state| state.doc.id == doc).ok_or("the placement document was closed")?;
     let action = Action::Place { doc, layer: state.active_layer, revision: state.revision, linked };
-    pick_source(app, action, name, bytes)
+    pick_source(app, action, name, bytes, false)
 }
 
-fn pick_source(app: &mut PhotocraftApp, action: Action, name: String, bytes: Vec<u8>) -> Result<Value, String> {
+fn pick_source(app: &mut PhotocraftApp, action: Action, name: String, bytes: Vec<u8>, automated: bool) -> Result<Value, String> {
     action.check(app)?;
     let inherited_order = if let Action::Relink(target) = action {
         app.with_document(target.doc, |app| {
@@ -185,10 +197,10 @@ fn pick_source(app: &mut PhotocraftApp, action: Action, name: String, bytes: Vec
     // Plain modern sources reserve their turn just like probed wrappers. Applying
     // one now would change the revision underneath an earlier unanswered choice.
     if !wrapped && question.is_none() && app.prompt_order.is_empty() && !crate::open_prompt::waiting(app) {
-        return apply_source(app, action, &name, Some(Arc::new(bytes)), inherited_order);
+        return apply_source(app, action, &name, Some(Arc::new(bytes)), inherited_order, automated);
     }
     let bytes = Arc::new(bytes);
-    let id = hold(app, action, name.clone(), Some(bytes.clone()), question, inherited_order)?;
+    let id = hold(app, action, automated, name.clone(), Some(bytes.clone()), question, inherited_order)?;
     if wrapped {
         let started =
             app.session.start_job_stepped(action.command(), Value::Null, "Reading replacement header", false, ProbeWork { name, bytes }, |_, question| {
@@ -219,23 +231,17 @@ fn pick_source(app: &mut PhotocraftApp, action: Action, name: String, bytes: Vec
 fn hold(
     app: &mut PhotocraftApp,
     action: Action,
+    automated: bool,
     name: String,
     bytes: Option<Arc<Vec<u8>>>,
     question: Option<photocraft_io::HistoricalXcfSampleOrderRequest>,
     inherited_order: Option<photocraft_doc::HistoricalXcfSampleOrder>,
 ) -> Result<u64, String> {
     let pending = &mut app.historical_replacements;
-    let retained = pending
-        .held
-        .iter()
-        .filter_map(|held| held.bytes.as_ref())
-        .try_fold(bytes.as_ref().map_or(0, |bytes| bytes.capacity()), |total, bytes| total.checked_add(bytes.capacity()));
-    if pending.held.len() >= 8 || retained.is_none_or(|bytes| bytes > 512 << 20) {
-        return Err("too many sources await a sample-order choice; finish or cancel an earlier choice".into());
-    }
+    pending.check_retention(bytes.as_ref().map_or(0, |bytes| bytes.capacity()), 512 << 20)?;
     let id = pending.next.checked_add(1).ok_or("replacement source identity limit reached")?;
     pending.next = id;
-    pending.held.push(Held { id, action, name, bytes, question, job: None, inherited_order });
+    pending.held.push(Held { id, action, automated, name, bytes, question, job: None, inherited_order });
     app.prompt_order.push_back(PromptKind::Replacement(id));
     Ok(id)
 }
@@ -317,6 +323,7 @@ fn apply_source(
     name: &str,
     bytes: Option<Arc<Vec<u8>>>,
     order: Option<photocraft_doc::HistoricalXcfSampleOrder>,
+    automated: bool,
 ) -> Result<Value, String> {
     action.check(app)?;
     if let Action::Edit(target) = action {
@@ -324,7 +331,7 @@ fn apply_source(
         return app.run(action.command(), json!({"layer":target.layer.0,"historicalXcfSampleOrder":order}));
     }
     if let Action::Replace(target) = action {
-        app.check_automation_command(action.command(), &json!({"layer":target.layer.0,"historicalXcfSampleOrder":order}))?;
+        app.check_automation_command(automated || app.automation_input, action.command(), &json!({"layer":target.layer.0,"historicalXcfSampleOrder":order}))?;
     }
     let bytes = owned_bytes(bytes.ok_or("the picked Smart Object source is gone")?);
     if let Action::Place { doc, linked, .. } = action {
@@ -393,7 +400,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, id: u64) {
     let Some(question) = held.question else {
         let held = app.historical_replacements.held.remove(position);
         app.prompt_order.pop_front();
-        if let Err(error) = apply_source(app, held.action, &held.name, held.bytes, held.inherited_order) {
+        if let Err(error) = apply_source(app, held.action, &held.name, held.bytes, held.inherited_order, held.automated) {
             app.ui.status = error;
             app.ui.status_error = true;
         }
@@ -413,6 +420,9 @@ pub(crate) fn validate(app: &PhotocraftApp, fields: &serde_json::Map<String, Val
     let id = fields.get(FIELD).and_then(Value::as_u64).ok_or("missing replacement source identity")?;
     if app.prompt_order.front() != Some(&PromptKind::Replacement(id)) {
         return Err("replacement dialog is stale or out of order".into());
+    }
+    if app.jobs.place.is_some() {
+        return Err(tl!("A file is still being placed; try again when it has finished.").into());
     }
     let held = app.historical_replacements.held.iter().find(|held| held.id == id).ok_or("replacement source is gone")?;
     if held.job.is_some() || held.question.is_none() {
@@ -439,7 +449,7 @@ pub(crate) fn answer(app: &mut PhotocraftApp, fields: &serde_json::Map<String, V
     let position = app.historical_replacements.held.iter().position(|held| held.id == id).ok_or("replacement source is gone")?;
     let held = app.historical_replacements.held.remove(position);
     app.prompt_order.pop_front();
-    let result = if accept { apply_source(app, held.action, &held.name, held.bytes, order) } else { Ok(json!({"cancelled":true})) };
+    let result = if accept { apply_source(app, held.action, &held.name, held.bytes, order, held.automated) } else { Ok(json!({"cancelled":true})) };
     crate::open_prompt::advance(app);
     result
 }

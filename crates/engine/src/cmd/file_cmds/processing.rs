@@ -285,11 +285,15 @@ pub(super) fn load_files_into_stack(s: &mut Session, p: &Value) -> Result<Value>
         return Err(EngineError::BadParams { cmd: cmd.into(), msg: "no files to load".into() });
     }
     let mut docs = Vec::new();
+    let mut notices = Vec::new();
     for path in &paths {
         let bytes = read_file(path)?;
         let name = file_name(path);
-        let document = super::open::import_source_at_raw_ppi(raw_ppi, &name, &bytes, &opts)?.document;
-        docs.push((name, document));
+        let imported = super::open::import_source_at_raw_ppi(raw_ppi, &name, &bytes, &opts)?;
+        if !imported.warnings.is_empty() {
+            notices.push(json!({"file": path, "warnings": imported.warnings}));
+        }
+        docs.push((name, imported.document));
     }
     let first = &docs[0].1;
     let w = docs.iter().map(|(_, d)| d.size.width).max().unwrap_or(1);
@@ -336,7 +340,11 @@ pub(super) fn load_files_into_stack(s: &mut Session, p: &Value) -> Result<Value>
             }
         }
     }
-    Ok(json!({"document": i, "layers": n}))
+    let mut result = json!({"document": i, "layers": n});
+    if !notices.is_empty() {
+        result["notices"] = json!(notices);
+    }
+    Ok(result)
 }
 
 // ---------- Scripts: flatten effects / masks ----------

@@ -509,7 +509,11 @@ fn statistics(s: &mut Session, p: &Value) -> Result<Value> {
     let id = s.active().and_then(|d| d.doc.layers.first().map(|l| l.id)).ok_or(EngineError::NoDocument)?;
     s.select_layer(id)?;
     s.execute(&format!("layer.smartObjects.stackMode.{}", sm.id()), json!({"layer": id.0}))?;
-    Ok(json!({"document": s.active_index(), "layer": id.0, "images": n, "mode": sm.id()}))
+    let mut result = json!({"document": s.active_index(), "layer": id.0, "images": n, "mode": sm.id()});
+    if let Some(notices) = r.get("notices") {
+        result["notices"] = notices.clone();
+    }
+    Ok(result)
 }
 
 // ---------- Contact Sheet II ----------

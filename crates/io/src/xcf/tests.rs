@@ -1825,7 +1825,7 @@ fn distinguishes_perceptual_rgb_from_lab_for_both_compositing_space_signs() {
 #[test]
 fn consecutive_link_properties_preserve_alignment_and_use_the_last_record() {
     use photocraft_doc::import_conversion::ImportConversion;
-    for height in [None, Some(0), Some(1), Some(2), Some(48)] {
+    for height in [None, Some(0), Some(1), Some(2), Some(48), Some(49)] {
         for second_short in [false, true] {
             let mut image = TestImage::rgb8(1, 1);
             image.version = 26;
@@ -1877,6 +1877,58 @@ fn a_link_missing_height_keeps_the_real_property_end_and_saved_pixels() {
     assert_eq!(pixel(&result.document.layers[0], 0, 0), [0.2, 0.4, 0.6, 1.0]);
     let Some(ImportConversion::Report(report)) = result.document.metadata.import_conversion.as_deref() else { panic!("report") };
     assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.link_layer" && entry.reason == ConversionReason::InvalidOptionalData));
+}
+
+#[test]
+fn a_link_missing_height_preserves_a_following_transform() {
+    use photocraft_doc::import_conversion::ImportConversion;
+    let mut payload = W { out: Vec::new(), wide: true };
+    payload.u32(0);
+    payload.string("x");
+    payload.u32(17);
+    let transform =
+        [16u32, 0, 0].into_iter().flat_map(u32::to_be_bytes).chain([1.0f32, 0., 0., 0., 1., 0., 0., 0., 1.].into_iter().flat_map(f32::to_be_bytes)).collect();
+    let mut image = TestImage::rgb8(1, 1);
+    image.version = 26;
+    let mut layer = TestLayer::rgba("Linked", 1, 1, vec![51, 102, 153, 255]);
+    layer.props.extend([(48, payload.out), (49, transform)]);
+    image.layers.push(layer);
+    let result = open(&image.write()).unwrap();
+    assert_eq!(pixel(&result.document.layers[0], 0, 0), [0.2, 0.4, 0.6, 1.0]);
+    let Some(ImportConversion::Report(report)) = result.document.metadata.import_conversion.as_deref() else { panic!("report") };
+    assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.link_layer" && entry.reason == ConversionReason::InvalidOptionalData));
+    assert!(report.entries.iter().any(|entry| entry.feature_code == "xcf.link_transform" && entry.source_description.contains("[16, 0]")));
+}
+
+#[test]
+fn a_link_report_describes_the_decoded_locator_independently_of_attachment_admission() {
+    use photocraft_doc::import_conversion::{ImportConversion, MAX_CONVERSION_ATTACHMENTS};
+    for exhaust_capacity in [false, true] {
+        let mut image = TestImage::rgb8(1, 1);
+        image.version = 26;
+        if exhaust_capacity {
+            // A single list is capped below this count, so supply inert records from two layers.
+            for name in ["First inventory", "Second inventory"] {
+                let mut layer = TestLayer::rgba(name, 1, 1, vec![17, 31, 57, 255]);
+                layer.props.extend((0..MAX_CONVERSION_ATTACHMENTS / 2).map(|i| (990, (i as u32).to_be_bytes().to_vec())));
+                image.layers.push(layer);
+            }
+        }
+        let mut payload = W { out: Vec::new(), wide: true };
+        payload.u32(0);
+        payload.string("relative.png");
+        payload.u32(1);
+        payload.u32(1);
+        let mut layer = TestLayer::rgba("Linked", 1, 1, vec![51, 102, 153, 255]);
+        layer.props.push((48, payload.out.clone()));
+        image.layers.push(layer);
+        let result = open(&image.write()).unwrap();
+        let Some(ImportConversion::Report(report)) = result.document.metadata.import_conversion.as_deref() else { panic!("report") };
+        let link = report.entries.iter().find(|entry| entry.feature_code == "xcf.link_layer").unwrap();
+        assert!(link.source_description.contains("decoded a 12-byte locator without resolving it"));
+        assert_eq!(report.attachments.iter().any(|attachment| attachment.bytes.as_slice() == payload.out), !exhaust_capacity);
+        assert_eq!(pixel(&layer_at(&result.document.layers, "Linked"), 0, 0), [0.2, 0.4, 0.6, 1.0]);
+    }
 }
 
 #[test]

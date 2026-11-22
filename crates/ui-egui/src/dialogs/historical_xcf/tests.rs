@@ -132,18 +132,61 @@ fn direct_historical_completion_leaves_next_historical_ahead_of_unrelated_decode
 #[test]
 fn resumed_held_completion_replaces_only_its_own_reservation() {
     let mut app = app();
-    app.run("file.new", json!({"width":2,"height":2})).unwrap();
-    let document = app.session.active().unwrap().doc.id;
+    app.run("edit.colorSettings", json!({"policyRgb":"preserve","askOnMissing":true})).unwrap();
+    let Started::Done(result) = app
+        .session
+        .start_open_for_user_with_background(
+            "resumed.xcf",
+            photocraft_engine::jobs::OpenSource::Bytes(std::sync::Arc::new(fixture::modern_pixel(0x1234))),
+            false,
+        )
+        .unwrap()
+    else {
+        panic!("inline engine decode")
+    };
+    assert!(result["held"].is_u64());
+    assert_eq!(result["color"]["missing"], true);
     let tab = resuming_before_historical_and_decoded(&mut app);
-    // With the reservation present finish_open re-holds this exact admitted
-    // document, and its completion must put A before C while leaving B after C.
-    crate::jobs_ui::finish_open_tab(&mut app, &tab, &json!({"docId":document.0,"warnings":[]})).unwrap();
+    crate::jobs_ui::finish_open_tab(&mut app, &tab, &result).unwrap();
+    assert_eq!(app.prompt_order.iter().copied().collect::<Vec<_>>(), [PromptKind::Open, PromptKind::Historical(102), PromptKind::Open]);
+    assert_eq!(app.held_opens.iter().map(|held| held.name.as_str()).collect::<Vec<_>>(), ["resumed.xcf", "later"]);
+    let document = app.held_opens[0].doc.id;
+    assert!(app.session.documents().is_empty());
+    let profile = profile_id(&app);
+    confirm(&mut app, profile).unwrap();
     assert_eq!(app.prompt_order.iter().copied().collect::<Vec<_>>(), [PromptKind::Historical(102), PromptKind::Open]);
     assert_eq!(app.held_opens.len(), 1);
     assert_eq!(app.held_opens[0].name, "later");
     assert_eq!(app.session.documents().len(), 1);
     assert_eq!(app.session.active().unwrap().doc.id, document);
     assert_eq!(dialogs(&app)[0].fields[FIELD], 102);
+}
+
+#[test]
+fn queued_damage_only_blocks_cancellation_when_it_is_first() {
+    for damage_first in [false, true] {
+        let mut app = app();
+        let mut damaged = later_document();
+        damaged.damage_pending = true;
+        if damage_first {
+            crate::open_prompt::arrive(&mut app, damaged);
+            app.open_bytes("historical.xcf", &fixture::historical_pixel(true)).unwrap();
+        } else {
+            app.open_bytes("historical.xcf", &fixture::historical_pixel(true)).unwrap();
+            crate::open_prompt::arrive(&mut app, damaged);
+        }
+        let source = app.historical_opens[0].id;
+        let result = crate::open_prompt::answer(&mut app, None);
+        if damage_first {
+            assert!(result.unwrap_err().contains("damaged PSD"));
+            assert!(app.session.holds_historical_xcf_open(source));
+        } else {
+            assert_eq!(result.unwrap()["cancelled"], 2);
+            assert!(!app.session.holds_historical_xcf_open(source));
+            assert!(app.prompt_order.is_empty());
+            assert!(app.held_opens.is_empty());
+        }
+    }
 }
 
 #[test]

@@ -52,10 +52,8 @@ impl PhotocraftApp {
     }
 
     /// Check the shell policy for a command, including picker results with opaque source bytes.
-    pub(crate) fn check_automation_command(&self, id: &str, params: &Value) -> Result<(), String> {
-        if self.automation_input
-            && let Some(authorize) = self.services.automation_command.as_ref()
-        {
+    pub(crate) fn check_automation_command(&self, automated: bool, id: &str, params: &Value) -> Result<(), String> {
+        if automated && let Some(authorize) = self.services.automation_command.as_ref() {
             authorize(id, params)?;
         }
         Ok(())
@@ -79,7 +77,7 @@ impl PhotocraftApp {
             self.ui.symmetry_transform = None;
         }
         let clip_read = std::mem::take(&mut self.clip_read_for_paste);
-        self.check_automation_command(id, &params)?;
+        self.check_automation_command(self.automation_input, id, &params)?;
         // A new layer while Free Transform is open applies the transform first, as Photoshop does
         // (#5667): History reads the transform (or Place Embedded), then New Layer. Only for a
         // command that can run; a transform refused or still being applied keeps the box open and
@@ -246,19 +244,16 @@ impl PhotocraftApp {
                 }
             }
         }
-        if id == crate::dialogs::image_processor_ui::COMMAND
-            && let Ok(reply) = &r
-        {
-            let warnings: Vec<String> = reply["notices"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|notice| {
-                    let file = notice["file"].as_str().unwrap_or_default();
-                    notice["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).map(move |message| format!("{file}: {message}"))
-                })
-                .collect();
-            notices::io_warnings(self, tl!("Image Processor…").trim_end_matches('…'), &warnings);
+        if let Ok(reply) = &r {
+            let label = match id {
+                crate::dialogs::image_processor_ui::COMMAND => Some(tl!("Image Processor…").trim_end_matches('…')),
+                crate::dialogs::stack_dialog::COMMAND => Some(tl!("Load Files into Stack…").trim_end_matches('…')),
+                crate::dialogs::stack_dialog::STATISTICS => Some(tl!("Image Statistics")),
+                _ => None,
+            };
+            if let Some(label) = label {
+                notices::file_result_warnings(self, reply, label);
+            }
         }
         if suppress_events {
             self.session.edit_prefs(|prefs| prefs.script_events.enabled = true);

@@ -110,6 +110,36 @@ fn legacy_short_palette_lengths_leave_rgb_and_gray_drawables_aligned() {
 }
 
 #[test]
+fn consecutive_unused_palettes_keep_drawable_and_resolution_boundaries() {
+    for first_is_short in [false, true] {
+        for second_undercounts in [false, true] {
+            let mut image = TestImage::rgb8(1, 1);
+            image.version = 26;
+            let mut first = vec![0, 0, 0, 1, 255];
+            if !first_is_short {
+                first.extend([0, 0]);
+            }
+            let second = vec![0, 0, 0, 1, 254, 0, 0];
+            image.image_props.extend([(1, first.clone()), (1, second.clone()), (19, [240f32.to_be_bytes(); 2].concat())]);
+            image.layers.push(TestLayer::rgba("Visible", 1, 1, vec![17, 31, 57, 255]));
+            let mut bytes = image.write();
+            for palette in [(!first_is_short).then_some(first), second_undercounts.then_some(second)].into_iter().flatten() {
+                let pattern = [1u32.to_be_bytes().as_slice(), &7u32.to_be_bytes(), &palette].concat();
+                let at = bytes.windows(pattern.len()).position(|candidate| candidate == pattern).unwrap();
+                bytes[at + 4..at + 8].copy_from_slice(&5u32.to_be_bytes());
+            }
+            let wrapped = crabz2::compress(&bytes, crabz2::Level::default());
+            for (name, data) in [("consecutive.xcf", bytes), ("consecutive.xcf.bz2", wrapped)] {
+                let imported = crate::import(name, &data).unwrap();
+                assert_eq!(imported.document.resolution_dpi, 240.);
+                assert_eq!(imported.document.layers[0].surface().unwrap().pixel(0, 0), [17. / 255., 31. / 255., 57. / 255., 1.]);
+                assert_eq!(crate::xcf::source_geometry(name, &data, &photocraft_raster::Interrupt::NONE).unwrap(), Some(((1., 1.), 240.)));
+            }
+        }
+    }
+}
+
+#[test]
 fn a_declared_unused_palette_boundary_can_precede_a_valid_dpi_record() {
     for base in [0, 1] {
         let mut image = TestImage::rgb8(1, 1);

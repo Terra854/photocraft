@@ -265,6 +265,7 @@ fn finish_place(app: &mut PhotocraftApp, ctx: &egui::Context, place: PlaceJob, o
         }
         JobOutcome::Cancelled => {}
     }
+    crate::open_prompt::advance(app);
     app.place_next_dropped(ctx);
 }
 

@@ -241,6 +241,11 @@ fn historical_sample_order_reaches_stack_statistics_contact_sheet_and_droplets()
             "units":"pixels","width":16,"height":16,"depth":16,"columns":1,"rows":1,"caption":false});
         let result = s.execute(command, params).unwrap();
         assert_eq!(result["layers"].as_u64().or_else(|| result["images"].as_u64()), Some(1), "{command}: {result}");
+        if command != "file.automate.contactSheetII" {
+            let notice = &result["notices"][0];
+            assert_eq!(notice["file"], json!(path));
+            assert!(notice["warnings"].as_array().unwrap().iter().any(|warning| warning.as_str().unwrap().contains("explicit big-endian choice")));
+        }
         let doc = s.active().unwrap().doc();
         let imported = doc.layers.last().unwrap().surface().unwrap();
         let bounds = imported.content_bounds();
